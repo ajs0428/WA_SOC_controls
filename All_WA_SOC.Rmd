@@ -1,0 +1,991 @@
+---
+title: "Washington Wetland Soil Carbon"
+author: "Anthony Stewart"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+header-includes: \usepackage{setspace}
+---
+
+
+<style type="text/css">
+.html-widget {
+    margin: auto;
+}
+
+h1.title {
+  font-size: 38px;
+  text-align: center;
+}
+</style>
+
+
+
+
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 75)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(rgl)
+library(terra)
+library(lme4)
+library(MASS)
+library(mgcv)
+library(lmerTest)
+library(RLRsim)
+library(terra)
+library(spatialEco)
+library(sf)
+library(mapview)
+library(tidyverse)
+library(car)
+library(ggplot2)
+library(sjPlot)
+library(sjstats)
+library(DHARMa)
+library(ggeffects)
+library(merTools)
+library(glmnet)
+library(stats)
+library(ggcorrplot)
+library(RColorBrewer)
+library(cowplot)
+library(webshot)
+library(kableExtra)
+
+knitr::knit_hooks$set(webgl = hook_webgl)
+rgl::setupKnitr(autoprint = TRUE)
+
+```
+
+```{r include=FALSE}
+
+# Quick R^2 function
+r.sq <- function(y,y.fitted){
+    res <- y-y.fitted
+    1-sum(res^2)/sum((y-mean(y))^2)
+}
+```
+
+
+# Introduction
+
+\doublespacing
+```{r include=FALSE}
+
+hoh <- st_read("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/HOH_POLYGON_7_11_2022/HOH_POLYGON_711.shp")
+mas <- st_read("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/MAS_poly/mashel_poly.shp")
+col <- st_read("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/COL_poly.shp")
+wa <- read.csv("SOIL CARBON/ANALYSIS/WA_SOC_GEE.csv")
+NWCA <- rast("NWCA Data/CONUS_Stock_Nov_20/CONUS_Full_Stock_Mean.tif")
+
+
+```
+
+
+Freshwater wetlands contain greater than 30% of the total soil organic carbon (SOC) stock of 1,500-2,400 PgC but only cover approximately 6% of the land surface (Campbell et al., 2022; Poulter et al., 2021; Reis et al., 2017; Scharlemann et al., 2014; Zhang et al., 2021). However, wetland identification and wetland soil carbon mapping research overlooks more complex and finer spatial variations in water saturation and potential wetland formation due to their coarse resolution or utilization of inventory-based extrapolations (Bridgham et al., 2006; Gorham, 1991; Hugelius et al., 2020; Poggio et al., 2021; Zhang et al., 2021). Smaller aquatic ecosystems have been known to disproportionately contribute towards global carbon cycling and exist at a more manageable scale, but their extent is difficult to assess in a spatially explicit analysis (Holgerson and Raymond, 2016). This leaves a significant gap in understanding the spatial distribution of smaller freshwater WC ecosystems and SOC storage. 
+
+This project aims to develop a SOC mapping approach with a statistical model that leverages a continuous wetland identification metric to predict spatially explicit SOC. Our expected results from this mapping approach development would provide fine, spatially explicit estimates of SOC stocks that highlights wetland areas.
+
+
+# Methods 
+
+The data for this study were collected across three study areas in Washington State; the Hoh, Mashel, and Colville watersheds. Each study area represents a climate zone with the Hoh being the wettest, the Mashel being intermediate, and the Colville being the driest. Each study area is mapped with a wetland intrinsic probability (WIP) measurement, a heat loading index (HLI) measurement, enhanced vegetation index (EVI), lithology, and surficial geology. Across study areas, a total of 96 sample locations were used to collect measurements of SOC stocks. Statistical models were built for predicting SOC from the combination of WIP, HLI, EVI, and site fixed effects with interaction random effects of lithology and surficial geology. Lithology was chosen to be a nested random effect within surficial geology. Both effects are categorical variables and the distribution of SOC across the categories is assumed to follow a normal distribution that was not accounted for in the original sampling scheme. 
+
+```{r include=FALSE}
+wa_gee <- read.csv("SOIL CARBON/ANALYSIS/WA_SOC_pts_spec.csv")
+
+#wa_large <- merge(wa_df, wa, by = "x")
+
+```
+
+
+
+```{r webgl=TRUE, out.width="50%", echo=FALSE, message=FALSE}
+pts <- st_as_sf(wa_gee, coords = c("x", "y"), crs = "EPSG:26910")
+
+mapView(pts)
+```
+
+```{r echo=FALSE, message=FALSE, include=FALSE}
+
+wa_dat <- wa_gee |> dplyr::select("site", "sample_name","CHN_30cm_Cstock_Mg_cm2",
+                              "CHN_90cm_Cstock_Mg_ha",  "CHN_1m_Cstock_Mg_ha",
+                              "CHN_120cm_Cstock_Mg_ha",
+                              "WIP", "geo_extractLabel", "geomorph", "x", "y", "hli", 
+                              "LITHOL",
+                              "EVI_median",  "DSI_median", "EMBI_median", "NDVI_median",
+                              "SAVI_median", "NDYI_median", "SCI_median", "DSWI1_median",
+                              "ANDWI_median",
+                              "MNDWI_median", "tree_canopy_cover", "age_lithol_extract") |>
+    #mutate_at("geomorph", as.factor) |>
+    mutate(TCC_fact = case_when(tree_canopy_cover>= 70 ~ "HFOR", 
+                                tree_canopy_cover >= 50 & tree_canopy_cover < 70 ~ "MFOR",
+                                tree_canopy_cover >= 25 & tree_canopy_cover < 50 ~ "LFOR", 
+                                tree_canopy_cover < 25 ~ "NON",)) |> 
+    mutate_if(is.character, as.factor) |>
+    stats::setNames(c("site", "name", "SOC30",
+                      "SOC90",  "SOC1",   "SOC120",
+                      "WIP", "GEO_Label", "geomorph", "x", "y", "hli", "LITHOL", "EVI",
+                      "DSI", "EMBI", "NDVI", "SAVI", "NDYI", "SCI", "DSWI1", "ANDWI", 
+                      "MNDWI", "TCC",  "AGE_LITHOL", "TCC_fact")) |> 
+    as.data.frame()
+str(wa_dat)
+
+hist(wa_dat$SOC1)
+```
+
+
+```{r echo=FALSE, fig.show='hold', out.width="100%"}
+library(ggfortify)
+wa_pc <- wa_dat[,c("WIP", "hli", "EVI","DSI", "EMBI", "NDVI", "SAVI", "NDYI", "SCI", "DSWI1", "ANDWI", "MNDWI", "TCC")]
+pc <- prcomp(wa_pc,
+             center = TRUE,
+            scale. = TRUE)
+summary(pc)
+
+biplot(pc, choices = c(1,2), xlabs = wa_dat$site)
+autoplot(pc, data = wa_dat, colour = "site") 
+
+ggplot(data.frame(pc$x))+aes(x=PC1,y=PC2, colour = wa_dat$site)+geom_point()+stat_ellipse()
+
+plot((pc$x[,1]), (wa_dat$SOC1), main = "PCA Component 1 vs. SOC")
+cor((pc$x[,10]), (wa_dat$SOC1))
+
+pca <- (pc$x[,1]) 
+pca4 <- (pc$x[,4]) 
+```
+Partial Least Squares Regression
+```{r echo=FALSE, fig.show='hold', out.width="100%", message=FALSE}
+library(pls)
+
+pls <- plsr((SOC1) ~ EVI + DSI+ EMBI +NDVI + 
+                SAVI +SCI +DSWI1 +ANDWI +MNDWI + TCC, scale = TRUE, validation="CV", data = wa_dat)
+summary(pls)
+
+pls1 <- pls$scores[,1]
+plot((pls$scores[,1]), (wa_dat$SOC1), main = "PLS Component 1 vs. SOC")
+cor((pls$scores[,1]), (wa_dat$SOC1))
+```
+
+Interactions
+```{r echo=FALSE, fig.show='hold', out.width="50%", message=FALSE}
+library(interactions)
+
+gmod <- glm(SOC1 ~ WIP:NDYI + AGE_LITHOL + hli:site,
+                data = wa_dat, family = Gamma(link = "log"))
+interact_plot(model = gmod, pred = hli, modx = site, y.label = "Soil Carbon Stock", data = wa_dat)+
+    theme(legend.position = 'right',
+          legend.key.size = unit(1, "cm"),
+          legend.title = element_text(size = 20),
+          legend.text = element_text(size = 20),
+          legend.background = element_blank(),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 20))
+```
+
+
+A check for spatial autocorrelation was conducted using correlograms. These did not reveal much spatial structure to the data across and within study areas except for somewhat in the Mashel. But this was considered negligiable.
+```{r echo=FALSE, fig.show='hold', out.width="75%", message=FALSE, eval=FALSE}
+wa_pts <- st_as_sf(wa_dat, coords = c("x", "y"), crs = "EPSG:26910")
+wa_pts <- na.omit(wa_pts)
+
+df <- spatialEco::correlogram(wa_pts, wa_pts$SOC1, dist = 85000)
+#plot(df$autocorrelation$dist, abs(df$autocorrelation$autocorrelation))
+```
+
+
+```{r echo=FALSE, fig.show='hold', out.width="50%", message=FALSE, eval=FALSE}
+
+hoh_pts <- st_as_sf(wa_dat[wa_dat$site == "HOH",], coords = c("x", "y"), crs = "EPSG:26910")
+mas_pts <- st_as_sf(wa_dat[wa_dat$site == "MAS",], coords = c("x", "y"), crs = "EPSG:26910")
+col_pts <- st_as_sf(wa_dat[wa_dat$site == "COL",], coords = c("x", "y"), crs = "EPSG:26910")
+
+spatialEco::correlogram(hoh_pts, hoh_pts$SOC1, dist = 1000)
+spatialEco::correlogram(mas_pts, mas_pts$SOC1, dist = 2000)
+spatialEco::correlogram(col_pts, col_pts$SOC1, dist = 800)
+```
+
+
+### Model selection: Generalized linear mixed effects models with the Gamma distirbution
+
+
+
+Since the goal of the analysis is to improve SOC mapping with wetland inclusion, the model selection needs to determine which of the hypothesized predictors creates the best model. Generalized linear mixed effects models were initially built from a global model with all potential fixed effects then filtered down progressively in order to identify the best model with Akaike's Information Criterion (AIC). 
+
+The potential fixed effects also includes an interaction term between WIP and a spectral metric, the normalized difference yellow index (NDYI) which was hypothesized to indicate water stressed vegetation and therefore higher accumulation of SOC. The interaction with the WIP metric would hypothetically relate the combination of high WIP values and high NYDI to high SOC.
+```{r}
+test_mod <- glm((SOC1) ~  (WIP+TCC)^2,
+                        family = Gamma(link = "log"), data = wa_dat);summary(test_mod)
+
+test_mod2 <- gam(SOC1 ~ WIP:NDYI + LITHOL, data = wa_dat);summary(test_mod2)
+```
+
+The gamma distribution with a log-link function was used after investigating the shape of the histogram for the SOC response variable 
+```{r echo=FALSE, message=FALSE}
+wa_gmod1 <- glm( (SOC1) ~  WIP:NDYI + AGE_LITHOL + hli:site,
+                        family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod2 <- glm( (SOC1) ~  WIP:NDYI + AGE_LITHOL + WIP:site,
+                       family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod3 <- glm( (SOC1) ~    NDYI + AGE_LITHOL + WIP:site,
+                       family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod4 <- glm( (SOC1) ~    WIP:SAVI + AGE_LITHOL + site,
+                       family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod5 <- glm( (SOC1) ~    WIP:SAVI + AGE_LITHOL,
+                       family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod6 <- glm( (SOC1) ~    WIP:SAVI,
+                       family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod7 <-  glmer( (SOC1) ~   WIP:NDYI + site +
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod8 <-  glmer( (SOC1) ~  site + NDYI + pca  + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod9 <-  glmer( (SOC1) ~  WIP:NDVI + hli+ 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod10 <-  glmer( (SOC1) ~   1+ 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod11 <-  glmer( (SOC1) ~  1 + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod12 <-  glmer( (SOC1) ~   WIP:NDYI + pca +
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod13 <-  glmer( (SOC1) ~    WIP:NDYI  + GEO_Label + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod14 <-  glmer( (SOC1) ~    WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = wa_dat)
+
+wa_gmod15 <-  glm( (SOC1) ~  WIP*NDYI+ LITHOL, family = Gamma(link = "log"), data = wa_dat)
+
+```
+
+```{r eval=FALSE, echo=FALSE}
+test_dat <- wa_dat[wa_dat$site =="HOH" & wa_dat$GEO_Label == "Pleistocene",]
+
+predict(wa_gmod1, test_dat, type = "response")
+```
+
+
+
+# Results 
+
+Model selection favored the model with WIP and HLI but not site or EVI. However, the delta AIC was <2 between the lowest and 2nd lowest AICs, which is a threshold for deciding on keeping model effects. The best two models according to AIC were evaluated using the Chi Square test in an ANOVA. The ANOVA showed that there is a negligiable difference between the two models, or that resulting deviance is not more extreme indicating support for the simpler model without site effects.
+```{r 'model list and table', message=FALSE, echo=FALSE}
+mod_list <- list(wa_gmod1, wa_gmod2, wa_gmod3, wa_gmod4, wa_gmod5, wa_gmod6, wa_gmod7, wa_gmod8, wa_gmod9, wa_gmod10, wa_gmod11, wa_gmod12, wa_gmod13, wa_gmod14, wa_gmod15)
+mod_names <- c("wa_gmod1", "wa_gmod2", "wa_gmod3", "wa_gmod4", "wa_gmod5", "wa_gmod6", "wa_gmod7", "wa_gmod8",  "wa_gmod9", "wa_gmod10", "wa_gmod11", "wa_gmod12", "wa_gmod13",  "wa_gmod14", "wa_gmod15")
+
+
+mod_AIC = matrix(nrow = length(mod_list), ncol =3)
+
+
+for (i in 1:length(mod_list)) {
+    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
+    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
+    mod_AIC[i,3] <- mod_names[i]
+}
+    
+delta_AIC <- as.data.frame(cbind(mod_AIC))
+delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
+names(delta_AIC) <- c("AIC", "formula", "name", "delta")
+
+
+library(kableExtra)
+delta_AIC %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+#tab_model(mod_list, show.aic = T, show.aicc = T, dv.labels = mod_names)
+```
+
+```{r echo=FALSE}
+library(kableExtra)
+delta_AIC %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+
+```{r echo=FALSE, message=FALSE}
+anova( wa_gmod14, wa_gmod14) #%>% kbl() %>%
+#   kable_classic_2("hover", full_width = F)
+summary(wa_gmod14)
+```
+
+The `pchisq` function showed the gamma distribution was a close match to our fitted model and was a good choice for the family within the GLMER.  
+```{r echo=FALSE, fig.show='hold', out.width="50%", message=FALSE,include=FALSE}
+plot(wa_gmod14)
+deviance(wa_gmod14) # is this only relative to other models?
+plot(cooks.distance(wa_gmod14))
+qqPlot(resid(wa_gmod14))
+
+qqnorm(unlist(ranef(wa_gmod14))) # why this
+qqline(unlist(ranef(wa_gmod14)))
+
+#is this wrong or meaningful?
+pchisq(q = deviance(wa_gmod14),df = length(wa_dat$site)-2,lower.tail = F) #p-value deviance
+
+```
+
+
+Diagnostics of the top two models showed that there was minimal amount of residual structure but maybe a slight bit of right skew. However, the DHARMa package was used to simulate residuals and showed a quite a bit of skew in the residuals. But this package contains some uncertainty as to the underlying methods for calculating the goodness of fit for GLMER Gamma models.
+```{r echo=FALSE, fig.show='hold', out.width="50%", message=FALSE}
+
+dd <- lme4::fortify.merMod(wa_gmod14)
+ggplot(dd, aes( sample =.resid)) + stat_qq() + geom_qq_line(color = "red")
+
+# dd3 <- lme4::fortify.merMod(wa_gmod3)
+# ggplot(dd3, aes( sample =.resid)) + stat_qq() + geom_qq_line(color = "red")
+
+
+#Does this imply model fits well with gamma distribution data
+plot(fitted(wa_gmod11), resid(wa_gmod14)/sd(resid(wa_gmod14)))
+abline(h = 0)
+# plot(fitted(wa_gmod3), resid(wa_gmod3)/sd(resid(wa_gmod3)))
+# abline(h = 0)
+
+```
+
+
+Overall model fit estimations showed that the there was a root mean square error of 93.53055 and an R^2^ of 0.55. 
+```{r echo=FALSE}
+library(rsq)
+# print("model1")
+# rmse(wa_gmod1)#*sd(wa_dat$SOC1)
+# r.sq(wa_dat$SOC1, fitted(wa_gmod1))
+
+print("model RMSE")
+rmse(wa_gmod1)#*sd(wa_dat$SOC1)
+print("model R^2")
+r.sq(wa_dat$SOC1, fitted(wa_gmod1))
+max(fitted(wa_gmod1))
+
+#pcor(wa_gmod1, adj = TRUE, type = 'lr')
+
+```
+
+Confidence intervals based on bootstrapping showed that our fixed effect parameters of site and HLI straddled 0 in the 90% range, indicating they may not be significant predictors. The WIP was a significant predictor according to these confidence intervals. However, bootstrapping was very limited with GLMER and there were >50% warnings that there was a singluar fit for the model and ~10% of the model runs failed to converge completely.
+
+\singlespacing
+```{r cache.lazy=FALSE, cache=TRUE, echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(7)
+# print("model1")
+# confint(wa_gmod1, method = "boot",nsim = 500)
+#print("model2")
+ci <- confint(wa_gmod1, method = "boot",nsim = 500, level = .90, oldNames=FALSE)
+```
+
+```{r echo=FALSE}
+ci %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+
+
+```{r echo=FALSE}
+PI <- predictInterval(
+    wa_gmod14,
+    which = c("full"),
+    level = 0.90,
+    n.sims = 1000,
+    stat = c("median"),
+    type = c("probability"),
+    include.resid.var = TRUE, 
+    returnSims = FALSE,
+    seed = 7
+)
+
+PI_df <- data.frame(mean.fit = mean(PI$fit), mean.upr =  mean(PI$upr), mean.lwr = mean(PI$lwr)) 
+
+PI_df%>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+
+\doublespacing
+
+```{r echo=FALSE, fig.show='hold', out.width="50%", message=FALSE}
+library(interactions)
+gmod <- glm(SOC1 ~ WIP + hli:site, data = wa_dat, family = Gamma(link = "log"))
+interact_plot(model = wa_gmod1, pred = hli, modx = site, colors = viridis::viridis(n = 3), vary.lty = F, data = wa_dat)
+#cat_plot(wa_gmod13, pred = LITHOL, modx = site)
+```
+
+
+Plotting the WIP probability with the SOC stocks colored by site shows there are some patterns in the data with Colville being a lower SOC range than the Hoh or Mashel. However there is still overlap between sites. 
+```{r out.width="100%", echo=FALSE, warning=FALSE, message=FALSE, fig.show='hold'}
+
+ggplot(wa_dat, aes(x = WIP*100, y = (SOC1),  shape = as.factor(WIP>=0.5))) +
+    geom_point(aes(fill = LITHOL), stroke = 1, size = 5, alpha = 0.8, show.legend = T) +
+    #geom_smooth(aes(x = WIP*100, group=LITHOL, color = site, fill = LITHOL), method = "lm", size = 1.2, se = F, linetype = 5, alpha = 0.3, show.legend = F) +
+    # scale_fill_manual(values = c( "#291F1E", "#A3333D", "#9C9CDB" ,"#477998"), 
+    #                   labels = c("Alluvium", "Clastic", "Glacial Drift",  "Glacial Till"),
+    #                   name = "Surficial \nGeology") +
+    #scale_fill_manual(name = "Geologic Age", values = c( "#264653",  "#2a9d8f", "#e9c46a" ,"#e76f51")) +
+    #scale_color_manual(name = "Geologic Age",values = c( "#264653",  "#2a9d8f", "#e9c46a" ,"#e76f51")) +
+    scale_shape_manual(values = c(21, 24), name = NULL, labels = c("Upland", "Wetland")) +
+    ggplot2::scale_size(name = NULL, breaks = NULL, labels = NULL) +
+    xlab("WIP Wetland Probability %") + ylab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +
+    xlim(0, 100) +
+    #ylim(0, 30) +
+    #scale_color_manual(labels = c("Riverine", "Non-Riverine"), values = c("blue", "red")) +
+    #labs(colour = "Random Effect") +
+    guides(fill = guide_legend(override.aes = list(shape = 22)),
+           shape = guide_legend(override.aes = list(size = 5)),
+           guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'bottom', 
+          legend.key.size = unit(1, "cm"),
+          legend.text = element_text(size = 8),
+          legend.background = element_blank(),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 18))
+############################################################################
+ggplot(wa_dat, aes(x = WIP*100, y = (SOC1),  shape = as.factor(WIP>=0.5))) +
+    geom_point(aes(fill = SAVI), stroke = 1.5, size = 5, alpha = 0.8, show.legend = T) +
+    scale_fill_gradientn(colors = viridis::viridis(n=10),
+                      name = "SAVI") +
+    #scale_fill_manual(name = "Geologic Age", values = c( "#264653",  "#2a9d8f", "#e9c46a" ,"#e76f51")) +
+    #scale_color_manual(name = "Geologic Age",values = c( "#264653",  "#2a9d8f", "#e9c46a" ,"#e76f51")) +
+    scale_shape_manual(values = c(21, 24), name = NULL, labels = c("Upland", "Wetland")) +
+    ggplot2::scale_size(name = NULL, breaks = NULL, labels = NULL) +
+    xlab("WIP Wetland Probability %") + ylab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +
+    xlim(0, 100) +
+    #ylim(0, 30) +
+    #scale_color_manual(labels = c("Riverine", "Non-Riverine"), values = c("blue", "red")) +
+    #labs(colour = "Random Effect") +
+    guides(#fill = guide_legend(override.aes = list(shape = 22)),
+           shape = guide_legend(override.aes = list(size = 5)),
+           guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right',
+          legend.key.size = unit(1, "cm"),
+          legend.title = element_text(size = 15),
+          legend.text = element_text(size = 15),
+          legend.background = element_blank(),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 20))
+
+# ggsave(filename= "/Users/Anthony/OneDrive - UW/University of Washington/Writing and Drafting/All Study Area SOC/Figures/GLMER_plot_LITHOL.png",
+#        width = 9, height = 7.5, units = "in")
+
+```
+
+The predicted vs. actual plot of SOC values shows that there is an underestimation of high wetland SOC stocks. 
+
+```{r out.width="100%", echo=FALSE, warning=FALSE, message=FALSE, fig.show='hold'}
+ggplot(wa_dat, aes(y = (fitted(wa_gmod1)), x = (SOC1))) +
+    geom_jitter(color='black', shape=21, aes(fill = (site)),
+                   # #shape = as.factor(WIP >= 0.5),
+                   size = 6, stroke = 1, alpha = 0.8) +
+    #scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+    geom_smooth(aes(y = (fitted(wa_gmod1)), x = (SOC1), group = site, color = site, fill = site), method = "lm", size = 1.2, linetype = 5, se = T, alpha = 0.3, show.legend = F) +
+    # scale_color_manual(name = "Landscape Class", values=c('#E69F00', '#56B4A1' , '#96E072',  '#56B4E9',  '#C1666B' ),
+    #                    labels= levels(as.factor(hoh_dat$landtype)))+#c("MioceneEocene", "QuaternaryRiverine", "QuaternaryAlluvium", "QuaternaryClastic")) +
+    #geom_ribbon(aes(x = sqrt(CARBON_1M), ymax = PI$upr, ymin = PI$lwr), alpha = 0.1, color = NA) +
+    #geom_smooth(aes(x = (SOC1), y = (PI$lwr)), lty = 3, size = 2, method = "lm", se = F, col = "#1664c9") +
+    #geom_smooth(aes(x = (SOC1), y = ( PI$upr)), lty = 3, size = 2, method = "lm", se = F, col = "#1664c9") +
+    #ggplot2::scale_size(name = NULL, breaks = NULL, labels = NULL) +
+    xlab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) + ylab(expression('Predicted 1m SOC Stock (MgC ha'^-1*')')) +
+    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    #labs(colour = "Random Effect") +
+    xlim(0, 700) +
+    ylim(0, 700)  +
+    guides(guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right',
+          legend.key.size = unit(1.7, "cm"),
+          legend.title = element_blank(),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 20))
+############################################################################
+ggplot(wa_dat, aes(y = (fitted(wa_gmod1)), x = (SOC1))) +
+    geom_point(color='black', shape=21, aes(fill = WIP*100),
+                   # #shape = as.factor(WIP >= 0.5), 
+                   size = 6, stroke = 1, alpha = 0.8) +
+    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
+                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+    geom_smooth(aes(y = (fitted(wa_gmod1)), x = (SOC1)), 
+                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
+                alpha = 0.2, size = 1.2, linetype = 5, alpha = 0.3, se = T) +
+    #geom_ribbon(aes(x = sqrt(CARBON_1M), ymax = PI$upr, ymin = PI$lwr), alpha = 0.1, color = NA) +
+    #geom_smooth(aes(x = (SOC1), y = (PI$lwr)), lty = 3, size = 2, method = "lm", se = F, col = "#1664c9") + 
+    #geom_smooth(aes(x = (SOC1), y = ( PI$upr)), lty = 3, size = 2, method = "lm", se = F, col = "#1664c9") +
+    #ggplot2::scale_size(name = NULL, breaks = NULL, labels = NULL) +
+    xlab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +  
+    ylab(expression('Predicted 1m SOC Stock (MgC ha'^-1*')')) +
+    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    #labs(colour = "Random Effect") +
+    xlim(0, 800) +
+    ylim(0, 800)  +
+    guides(guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right', 
+          legend.key.size = unit(1.7, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 18))
+
+# ggplot2::ggsave("/Users/Anthony/OneDrive - UW/University of Washington/Writing and Drafting/All Study Area SOC/Figures/Actual vs Predicted.png",
+#                 width = 9, height = 7.5, units = "in")
+```
+
+# Discussion
+
+\doublespacing
+The choice of a GLMER vs. a LMER preserved interpretation of the response variable and relaxed the restrictions needed to meet the normally distributed errors and independence. The data also fit the Gamma distribution well and allows for easy prediction to the response units using the log-link function. The goal of this study was to evaluate a prediction model that included WIP probability and this can be evaluated by making spatial predictions across the three study areas using the GLMER with response units. 
+
+The top two models from the GLMER model selection according to AIC represent a stark difference in potential inference but with very little effect on the overall prediction. Including the site fixed effect in the model was not strongly supported with AIC but was within the 2 delta AIC threshold for model differences. By including site, some inference can be made towards the size of the effect of region and climate on SOC stocks and compared to the WIP probability. However, the range of the confidence intervals seems to span 0 which indicates lack of significance for the site parameter. Again, using both models in spatial prediction could better evaluate potential model performance. 
+
+For all models, there was still a high amount of under-prediction on the high end of SOC stocks especially in wetlands. Further investigation of additional geologic and lithologic factors did not reveal large improvements in the upper range of SOC stock values. Further landforms derived from lidar digital elevation models could improve predictions but there is uncertainty in how they would be included in the model structure. Likely, improvement may need to come from the search for another fixed effect that can explain the higher range of SOC stocks related to biomass productivity and/or SOC accumulation more directly.
+
+
+```{r eval=FALSE, include=FALSE}
+h_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_WIP_Mask0_10_2022.tif")
+h_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_HLI.tif")
+h_lith <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_lithol.tif")
+#h_site <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_sitecat.tif")
+h_ndyi <- rast("SOIL CARBON/SPATIAL LAYERS/GEE/all_spec_GEE/hoh_Spectral_NDYI.tif")
+h_ndvi <- rast("SOIL CARBON/SPATIAL LAYERS/GEE/GEE_7_11_22/hoh_spec_5yr_sea2_tif_GEE_7_11_22.tif")
+
+rs <- c(h_wip, h_hli, h_lith, h_ndyi)
+names(rs) <- c("WIP", "hli", "LITHOL", "NDYI")
+
+pred <- predict(rs, wa_gmod1, allow.new.levels = T, type = "response", filename = "SOIL CARBON/All_WA/hoh_all_wa_SOC.tif", overwrite = TRUE, na.rm = T)
+```
+
+
+```{r 'separating study areas'}
+wa_dat$fitted <- fitted(wa_gmod1)
+hoh_dat <- wa_dat[wa_dat$site == "HOH",]
+mas_dat <- wa_dat[wa_dat$site == "MAS",]
+col_dat <- wa_dat[wa_dat$site == "COL",]
+```
+
+
+```{r}
+r.sq(hoh_dat$SOC1, hoh_dat$fitted)
+r.sq(mas_dat$SOC1, mas_dat$fitted)
+r.sq(col_dat$SOC1, col_dat$fitted)
+```
+
+```{r}
+rmse_fun <- function(x, y){
+    rmse = sqrt(sum((x-y)**2)/length(x))
+    return(rmse)
+}
+
+rmse_fun(hoh_dat$SOC1, hoh_dat$fitted)
+rmse_fun(mas_dat$SOC1, mas_dat$fitted)
+rmse_fun(col_dat$SOC1, col_dat$fitted)
+```
+
+# Hoh study area 
+
+
+```{r echo=FALSE, message=FALSE}
+hoh_gmod1 <- glmer( (SOC1) ~  WIP + NDYI + NDVI +
+                        DSI + EMBI + MNDWI +
+                        (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod2 <- glmer( (SOC1) ~   WIP + NDYI + NDVI + 
+                        DSI + EMBI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod3 <- glmer( (SOC1) ~    WIP + NDYI + NDVI + 
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod4 <- glmer( (SOC1) ~   WIP + NDYI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod5 <- glmer( (SOC1) ~   WIP +
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod6 <-  glmer( (SOC1) ~   WIP:NDYI + NDVI +
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod7 <-  glmer( (SOC1) ~   WIP:NDYI + NDVI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod8 <-  glmer( (SOC1) ~  WIP:NDYI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod9 <-  glmer( (SOC1) ~  WIP:NDYI +  
+                       (1|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod10 <-  glmer( (SOC1) ~   WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod11 <-  glmer( (SOC1) ~  WIP + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod12 <-  glmer( (SOC1) ~  WIP + NDYI +
+                       (1|GEO_Label), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod13 <-  glmer( (SOC1) ~    WIP:NDYI  + GEO_Label + 
+                       (1 + WIP|GEO_Label), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod14 <-  glmer( (SOC1) ~    WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = hoh_dat)
+
+hoh_gmod15 <-  glm( (SOC1) ~    WIP:NDYI + LITHOL, family = Gamma(link = "log"), data = hoh_dat)
+
+```
+
+
+```{r 'model list and table', message=FALSE, echo=FALSE}
+mod_list <- list(hoh_gmod1, hoh_gmod2, hoh_gmod3, hoh_gmod4, hoh_gmod5, hoh_gmod6, hoh_gmod7, hoh_gmod8, hoh_gmod9, hoh_gmod10, hoh_gmod11, hoh_gmod12, hoh_gmod13, hoh_gmod14, hoh_gmod15)
+mod_names <- c("hoh_gmod1", "hoh_gmod2", "hoh_gmod3", "hoh_gmod4", "hoh_gmod5", "hoh_gmod6", "hoh_gmod7", "hoh_gmod8",  "hoh_gmod9", "hoh_gmod10", "hoh_gmod11", "hoh_gmod12", "hoh_gmod13",  "hoh_gmod14", "hoh_gmod15")
+
+
+mod_AIC = matrix(nrow = length(mod_list), ncol =3)
+
+
+for (i in 1:length(mod_list)) {
+    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
+    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
+    mod_AIC[i,3] <- mod_names[i]
+}
+    
+delta_AIC <- as.data.frame(cbind(mod_AIC))
+delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
+names(delta_AIC) <- c("AIC", "formula", "name", "delta")
+
+
+
+#tab_model(mod_list, show.aic = T, show.aicc = T, dv.labels = mod_names)
+```
+
+```{r echo=FALSE}
+library(kableExtra)
+delta_AIC %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+```{r}
+print("model RMSE")
+rmse(hoh_gmod5)#*sd(wa_dat$SOC1)
+print("model R^2")
+r.sq(hoh_dat$SOC1, fitted(hoh_gmod5))
+max(fitted(hoh_gmod5))
+```
+```{r}
+ggplot(hoh_dat, aes(y = (fitted(hoh_gmod5)), x = (SOC1))) +
+    geom_point(color='black', shape=21, aes(fill = WIP*100),
+                   # #shape = as.factor(WIP >= 0.5), 
+                   size = 6, stroke = 1, alpha = 0.8) +
+    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
+                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+    geom_smooth(aes(y = (fitted(hoh_gmod5)), x = (SOC1)), 
+                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
+                alpha = 0.2, size = 1.2, linetype = 5, alpha = 0.3, se = T) +
+    xlab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +  
+    ylab(expression('Predicted 1m SOC Stock (MgC ha'^-1*')')) +
+    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    #labs(colour = "Random Effect") +
+    xlim(0, 800) +
+    ylim(0, 800)  +
+    guides(guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right', 
+          legend.key.size = unit(1.7, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 18))
+```
+
+
+# Other study areas Mashel
+
+
+```{r echo=FALSE, message=FALSE}
+mas_gmod1 <- glmer( (SOC1) ~  WIP + NDYI + NDVI +
+                        DSI + EMBI + MNDWI +
+                        (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod2 <- glmer( (SOC1) ~   WIP + NDYI + NDVI + 
+                        DSI + EMBI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod3 <- glmer( (SOC1) ~    WIP + NDYI + NDVI + 
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod4 <- glmer( (SOC1) ~   WIP + NDYI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod5 <- glmer( (SOC1) ~   WIP +
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod6 <-  glmer( (SOC1) ~   WIP:NDYI + NDVI +
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod7 <-  glmer( (SOC1) ~   WIP:NDYI + NDVI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod8 <-  glmer( (SOC1) ~  WIP:NDYI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod9 <-  glmer( (SOC1) ~  WIP:NDYI +  
+                       (1|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod10 <-  glmer( (SOC1) ~   WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod11 <-  glmer( (SOC1) ~  WIP + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod12 <-  glmer( (SOC1) ~  WIP + NDYI +
+                       (1|GEO_Label), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod13 <-  glmer( (SOC1) ~    WIP:NDYI  + GEO_Label + 
+                       (1 + WIP|GEO_Label), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod14 <-  glmer( (SOC1) ~    WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = mas_dat)
+
+mas_gmod15 <-  glm( (SOC1) ~    WIP:NDYI + LITHOL, family = Gamma(link = "log"), data = mas_dat)
+```
+
+
+```{r 'model list and table', message=FALSE, echo=FALSE}
+mod_list <- list(mas_gmod1, mas_gmod2, mas_gmod3, mas_gmod4, mas_gmod5, mas_gmod6, mas_gmod7, mas_gmod8, mas_gmod9, mas_gmod10, mas_gmod11, mas_gmod12, mas_gmod13, mas_gmod14, mas_gmod15)
+mod_names <- c("mas_gmod1", "mas_gmod2", "mas_gmod3", "mas_gmod4", "mas_gmod5", "mas_gmod6", "mas_gmod7", "mas_gmod8",  "mas_gmod9", "mas_gmod10", "mas_gmod11", "mas_gmod12", "mas_gmod13",  "mas_gmod14", "mas_gmod15")
+
+
+mod_AIC = matrix(nrow = length(mod_list), ncol =3)
+
+
+for (i in 1:length(mod_list)) {
+    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
+    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
+    mod_AIC[i,3] <- mod_names[i]
+}
+    
+delta_AIC <- as.data.frame(cbind(mod_AIC))
+delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
+names(delta_AIC) <- c("AIC", "formula", "name", "delta")
+
+
+
+#tab_model(mod_list, show.aic = T, show.aicc = T, dv.labels = mod_names)
+```
+
+```{r echo=FALSE}
+library(kableExtra)
+delta_AIC %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+
+```{r}
+print("model RMSE")
+rmse(mas_gmod15)#*sd(wa_dat$SOC1)
+print("model R^2")
+r.sq(mas_dat$SOC1, fitted(mas_gmod15))
+max(fitted(mas_gmod15))
+```
+```{r}
+ggplot(mas_dat, aes(y = (fitted(mas_gmod15)), x = (SOC1))) +
+    geom_point(color='black', shape=21, aes(fill = WIP*100),
+                   # #shape = as.factor(WIP >= 0.5), 
+                   size = 6, stroke = 1, alpha = 0.8) +
+    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
+                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+    geom_smooth(aes(y = (fitted(mas_gmod15)), x = (SOC1)), 
+                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
+                alpha = 0.2, size = 1.2, linetype = 5, alpha = 0.3, se = T) +
+    xlab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +  
+    ylab(expression('Predicted 1m SOC Stock (MgC ha'^-1*')')) +
+    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    #labs(colour = "Random Effect") +
+    xlim(0, 600) +
+    ylim(0, 600)  +
+    guides(guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right', 
+          legend.key.size = unit(1.7, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 18))
+```
+
+```{r "prediction mashel", eval=FALSE, include=FALSE}
+m_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mashel_WIP_clip.tif")
+m_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_HLI.tif")
+m_lith <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_lithol.tif")
+m_ndyi <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_NDYI.tif")
+#m_site <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_sitecat.tif")
+
+rs <- c(m_wip, m_hli, m_lith, m_ndyi)
+names(rs) <- c("WIP", "hli", "LITHOL", "NDYI")
+
+pred <- predict(rs, wa_gmod1, allow.new.levels = T, type = "response", filename = "SOIL CARBON/All_WA/mas_all_wa_SOC.tif", overwrite = TRUE, na.rm = T)
+```
+
+
+# Other study areas Colville
+
+```{r echo=FALSE, message=FALSE}
+col_gmod1 <- glmer( (SOC1) ~  WIP + NDYI + NDVI +
+                        DSI + EMBI + MNDWI +
+                        (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod2 <- glmer( (SOC1) ~   WIP + NDYI + NDVI + 
+                        DSI + EMBI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod3 <- glmer( (SOC1) ~    WIP + NDYI + NDVI + 
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod4 <- glmer( (SOC1) ~   WIP + NDYI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod5 <- glmer( (SOC1) ~   WIP +
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod6 <-  glmer( (SOC1) ~   WIP:NDYI + MNDWI +
+                        DSI + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod7 <-  glmer( (SOC1) ~   WIP:NDYI + NDVI +
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod8 <-  glmer( (SOC1) ~  WIP:NDYI +  hli + 
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod9 <-  glmer( (SOC1) ~  WIP:NDYI +  
+                       (1|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod10 <-  glmer( (SOC1) ~   WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod11 <-  glmer( (SOC1) ~  WIP + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod12 <-  glmer( (SOC1) ~  WIP + NDYI +
+                       (1|GEO_Label), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod13 <-  glmer( (SOC1) ~    WIP:NDYI  + GEO_Label + 
+                       (1 + WIP|GEO_Label), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod14 <-  glmer( (SOC1) ~    WIP:NDYI + 
+                       (1 + WIP|LITHOL), family = Gamma(link = "log"), data = col_dat)
+
+col_gmod15 <-  glm( (SOC1) ~    WIP:NDYI + LITHOL, family = Gamma(link = "log"), data = col_dat)
+
+```
+
+
+
+
+```{r 'model list and table', message=FALSE, echo=FALSE}
+mod_list <- list(col_gmod1, col_gmod2, col_gmod3, col_gmod4, col_gmod5, col_gmod6, col_gmod7, col_gmod8, col_gmod9, col_gmod10, col_gmod11, col_gmod12, col_gmod13, col_gmod14, col_gmod15)
+mod_names <- c("col_gmod1", "col_gmod2", "col_gmod3", "col_gmod4", "col_gmod5", "col_gmod6", "col_gmod7", "col_gmod8",  "col_gmod9", "col_gmod10", "col_gmod11", "col_gmod12", "col_gmod13",  "col_gmod14", "col_gmod15")
+
+
+mod_AIC = matrix(nrow = length(mod_list), ncol =3)
+
+
+for (i in 1:length(mod_list)) {
+    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
+    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
+    mod_AIC[i,3] <- mod_names[i]
+}
+    
+delta_AIC <- as.data.frame(cbind(mod_AIC))
+delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
+names(delta_AIC) <- c("AIC", "formula", "name", "delta")
+
+
+
+#tab_model(mod_list, show.aic = T, show.aicc = T, dv.labels = mod_names)
+```
+
+```{r echo=FALSE}
+library(kableExtra)
+delta_AIC %>%
+  kbl() %>%
+  kable_classic_2("hover", full_width = F)
+```
+```{r}
+print("model RMSE")
+rmse(col_gmod7)#*sd(wa_dat$SOC1)
+print("model R^2")
+r.sq(col_dat$SOC1, fitted(col_gmod7))
+max(fitted(col_gmod7))
+```
+
+
+
+```{r}
+ggplot(col_dat, aes(y = (fitted(col_gmod7)), x = (SOC1))) +
+    geom_point(color='black', shape=21, aes(fill = WIP*100),
+                   # #shape = as.factor(WIP >= 0.5), 
+                   size = 6, stroke = 1, alpha = 0.8) +
+    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
+                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+    geom_smooth(aes(y = (fitted(col_gmod7)), x = (SOC1)), 
+                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
+                alpha = 0.2, size = 1.2, linetype = 5, alpha = 0.3, se = T) +
+    xlab(expression('Sampled 1m SOC Stock (MgC ha'^-1*')')) +  
+    ylab(expression('Predicted 1m SOC Stock (MgC ha'^-1*')')) +
+    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    #labs(colour = "Random Effect") +
+    xlim(0, 400) +
+    ylim(0, 400)  +
+    guides(guide_legend(byrow = TRUE)) +
+    theme(legend.position = 'right', 
+          legend.key.size = unit(1.7, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 18))
+```
+
+
+
+
+
+```{r "prediction colville", eval=FALSE, include=FALSE}
+c_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/colville_NWI_WIP_clip_INV.tif")
+c_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_HLI.tif")
+c_hli_rsp <- resample(c_hli, c_wip)
+c_lith <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_lithol.tif")
+c_ndyi <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_NDYI.tif")
+
+rs <- c(c_wip, c_hli_rsp, c_lith, c_ndyi)
+names(rs) <- c("WIP", "hli", "LITHOL", "NDYI")
+
+pred <- predict(rs, wa_gmod1, allow.new.levels = T, type = "response", filename = "SOIL CARBON/All_WA/col_all_wa_SOC.tif", overwrite = TRUE, na.rm = T)
+```
+
+
+
