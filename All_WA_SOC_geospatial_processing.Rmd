@@ -1,0 +1,163 @@
+---
+title: 'Data processing for geospatial predictors'
+author: "Anthony Stewart"
+output: html_document
+---
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+h1, h4, h3 {
+  text-align: center;
+}
+```
+
+
+```{r setup, include=FALSE}
+library(formatR)
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 75)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = T, collapse = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(terra)
+library(aqp)
+library(ithir)
+library(mpspline2)
+library(dplyr)
+```
+
+### Point Data
+
+Soil pedon locations contain multiple observations per pedon, one for each horizon.
+
+```{r eval=FALSE}
+library(terra)
+library(tidyterra)
+
+wa_dat <- read.csv("SOIL CARBON/ANALYSIS/All_WA_horizons_spec_geoage.csv") |>
+    dplyr::select(sample_ID, site, depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2, x, y)
+str(wa_dat)
+
+wa_dat_pts <- vect(wa_dat, geom = c("x", "y"), crs = "EPSG:26910")
+plot(wa_dat_pts)
+```
+
+### Raster and Vector data 
+
+We import and project geospatial data derived from digital elevation models (DEMs) 
+
+In particular, `geomorphons` is derived using **Whitebox Tools** which implements the algorithm from 
+
+*Jasiewicz, J., and Stepinski, T. F. (2013). Geomorphons — a pattern recognition approach to classification and mapping of landforms. Geomorphology, 182, 147-156.*
+
+- The 10 types of geomorphons are given categorical letter codes
+
+```{r eval=FALSE}
+
+catconv <- data.frame(id = 1:10, geomorphons = letters[1:10])
+
+#Colville
+col_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_HLI.tif") |> project("EPSG:26910")
+col_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_geomorphons_11_23.tif")
+col_geomorph_cat <- categories(col_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
+
+
+#Mashel
+mas_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_HLI.tif") |> project("EPSG:26910")
+mas_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_geomorphons_11_23.tif")|>
+    project("EPSG:26910")
+mas_geomorph_cat <- categories(mas_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
+
+
+#Hoh
+hoh_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_HLI.tif") |> project("EPSG:26910")
+hoh_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_geomorphons_11_23.tif")
+hoh_geomorph_cat <- categories(hoh_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
+```
+
+
+We merge layers to make extracting geospatial predictors easier
+
+The `merge_wip` refers to the **Wetland Intrinsic Potential** (WIP) tool and is derived from implementing the algorithm in
+
+*Halabisky, Meghan, Dan Miller, Anthony J. Stewart, Amy Yahnke, Daniel Lorigan, Tate Brasel, and Ludmila Monika Moskal. “The Wetland Intrinsic Potential Tool: Mapping Wetland Intrinsic Potential through Machine Learning of Multi-Scale Remote Sensing Proxies of Wetland Indicators.” Hydrology and Earth System Sciences 27, no. 20 (October 20, 2023): 3687–99. https://doi.org/10.5194/hess-27-3687-2023.*
+
+
+```{r eval=FALSE}
+#Merge Layers
+geomorph_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")#terra::merge(col_geomorph_cat, mas_geomorph_cat, hoh_geomorph_cat, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")
+hli_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")#terra::merge(col_hli, mas_hli, hoh_hli, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")
+
+merge_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_WIP_MERGE.tif")
+```
+
+Here is a map of the Hoh River Watershed WIP, where `0.0 = 0% Wetland or Upland` and `1.0 = 100% Wetland`
+
+- The gradient captures hydrologic conditions across the landscape and derived mostly from topography metrics at different scales 
+
+```{r echo=FALSE, message=FALSE}
+library(rasterVis)
+
+hohwip <- (rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_WIP_Mask0_10_2022.tif"))
+colr <- colorRampPalette(RColorBrewer::brewer.pal(9, "YlGnBu"))
+levelplot(hohwip, margin = F, par.settings=list(
+            axis.line=list(col='transparent') # suppress axes and legend outline
+          ), scales=list(draw=FALSE), maxpixels = 9e5, 
+          col.regions=colr)
+```
+
+
+More geospatial predictors from across WA state. This includes precipitation and temperature from The PRISM Climate Group
+
+*PRISM Climate Group, Oregon State University, https://prism.oregonstate.edu* 
+
+Spectral data are considered to approximate vegetation productivity and health. They are derived from Landsat median reflectance data collected over 2013-2022 and downloaded from Google Earth Engine.
+
+Geology data on geologic age and lithology are downloaded from the WA Dept. of Natural Resoures
+
+```{r eval=FALSE}
+#All WA layers
+wa_state <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_State_Boundary/WA_State_Boundary.shp") |> project("EPSG:4326")
+
+wa_precip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_Precip.tif") |> terra::project("EPSG:26910")
+wa_temp <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_Temp.tif") |> terra::project("EPSG:26910")
+
+wa_geology <- vect("WA_Geo/ger_portal_surface_geology_100k/surface_geology_100k.gdb", layer = "geologic_unit_poly_100k") |> 
+    terra::project("EPSG:26910") |> tidyterra::select(LITHOLOGY, GEOLOGIC_AGE)
+
+wa_spec1 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000000000-0000000000.tif") 
+wa_spec2 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000000000-0000019968.tif")#
+wa_spec3 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000006656-0000006656.tif")#
+
+wa_spec_merge <- terra::merge(wa_spec1, wa_spec2, wa_spec3, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_GEE_spec_median_merge.tif", overwrite = T) |>
+    project("EPSG:26910")
+```
+
+### Extraction
+
+The locations of the pedon observations are used to extract all geospatial metrics. 
+
+```{r eval=FALSE}
+
+wa_geo_ext <- read.csv("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_geo_extract.csv")
+
+wa_dat_pts_ext <- wa_dat_pts |> terra::extract(x = geomorph_stack, bind = TRUE, method = "simple") |>
+    terra::extract(x = hli_stack, bind = TRUE, method = "simple") |>
+    terra::extract(x = wa_precip, bind = TRUE, method = "simple") |> 
+    terra::extract(x = wa_temp, bind = TRUE, method = "simple") |>
+    terra::extract(x = merge_wip, bind = TRUE, method = "simple") |>
+    terra::extract(x = wa_spec_merge, bind = TRUE, method = "simple") |> 
+    tidyterra::rename(HLI = lyr.1,
+                      Precip = PRISM_ppt_30yr_normal_800mM4_annual_asc,
+                      Temp = PRISM_tmean_30yr_normal_800mM4_annual_asc,
+                      WIP = WET) |>
+    tidyterra::select(-uncertainty) |>
+    tidyterra::bind_spat_cols(wa_geo_ext[,c("LITHOLOGY", "GEOLOGIC_AGE")])
+(values(wa_dat_pts_ext))
+names(wa_dat_pts_ext)
+
+write.csv(wa_dat_pts_ext, file = "SOIL CARBON/ANALYSIS/R/WA_SOC_controls/All_WA_horizons_spec_geoagelith.csv")
+writeVector(wa_dat_pts_ext, file = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/All_WA_horizons_spec_geoagelith.gpkg", overwrite = T)
+```
+

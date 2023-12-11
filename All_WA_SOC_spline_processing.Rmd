@@ -1,0 +1,89 @@
+---
+title: 'Data processing for interpolated depth intervals'
+author: "Anthony Stewart"
+output: html_document
+---
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+h1, h3 {
+  text-align: center;
+}
+```
+
+
+```{r setup, include=FALSE}
+library(formatR)
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 75)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = T, collapse = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(terra)
+library(aqp)
+library(ithir)
+library(mpspline2)
+library(dplyr)
+```
+
+### Data
+
+The dataset of SOC stock by horizons for 96 pedon locations in Washington state contains 481 separate observations.
+
+
+```{r eval=FALSE}
+library(terra)
+library(aqp)
+library(ithir)
+library(mpspline2)
+library(dplyr)
+
+setwd("/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/")
+
+wa_dat <- read.csv("SOIL CARBON/ANALYSIS/R/WA_SOC_controls/All_WA_horizons_spec_geoagelith.csv")
+str(wa_dat)
+```
+
+Next we calculate top, center, and bottoms of the soil horizons
+
+```{r eval=FALSE}
+wa_dat_horC <- wa_dat |>
+    dplyr::group_by(sample_ID) |> 
+    mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
+                           .default = lag(depth_cm)),
+           bottom = depth_cm,
+           center = abs(top - (top - bottom)/2)) |> 
+    dplyr::select(sample_ID, top, center, bottom, carbon_perc, carbon_stock_g_cm2) 
+str(wa_dat_horC)
+```
+
+Next, create a subset of the data with only the predictor variables
+
+- This will be joined to the new spline dataframes
+
+- There should be 96 rows (number of pedons collected in WA)
+
+```{r eval=FALSE}
+
+wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(X, depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2)) |>
+    group_by(sample_ID) |>
+    filter(row_number() == 1) |> 
+    dplyr::select(sample_ID, everything()) |>
+    dplyr::arrange(site)
+str(wa_hor_dat_sub)
+```
+
+In order to generate mapped predictions of SOC stock, we use adjust the dataset from observations of horizons of varying depths to observations of standard depth increments. Specifically, we use the mass-preserving spline method of Bishop et al (1999) (doi: 10.1016/S0016-7061(99)00003-8) to generate SOC stock estimates for intervals of 0-30cm, 30-60cm, and 60-100cm
+```{r eval=FALSE}
+wa_spl <- mpspline_tidy(obj = wa_dat_horC, var_name = "carbon_stock_g_cm2", d = c(0, 30, 60, 100)) 
+wa_spl_dat_0_30_60_100 <- wa_spl$est_dcm |>
+    left_join(y = wa_hor_dat_sub, by = join_by(sample_ID), relationship = "many-to-one") |>
+    rename(SOC_stock_spline = SPLINED_VALUE,
+           upper_depth = UD,
+           lower_depth = LD)
+str(wa_spl_dat_0_30_60_100)
+write.csv(wa_spl_dat_0_30_60_100, file = "SOIL CARBON/ANALYSIS/R/WA_SOC_controls/wa_spl_dat_0_30_60_100.csv")
+
+```
+

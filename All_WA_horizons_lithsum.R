@@ -20,12 +20,7 @@ r.sq <- function(y,y.fitted){
     1-sum(res^2)/sum((y-mean(y))^2)
 }
 
-
-
-
-
-
-wa_hor_dat <- read.csv("SOIL CARBON/ANALYSIS/All_WA_horizons_lithsum2.csv")
+wa_hor_dat <- read.csv("SOIL CARBON/ANALYSIS/All_WA_horizons_spec_geoage.csv")
 str(wa_hor_dat)
 
 wa_dat <- wa_hor_dat |> dplyr::select("sample_ID", "lat","lon","depth_cm", "thickness_cm",
@@ -162,8 +157,8 @@ ggplot(wa_dat, aes(y = (fitted(dmod)), x = log(SOC_stock))) +
     geom_smooth(aes(y = (fitted(dmod)), x = log(SOC_stock)), 
                 method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
                 alpha = 0.2, size = 1.2, linetype = 5, alpha = 0.3, se = T) +
-    xlab(expression('Sampled SOC % (MgC ha'^-1*')')) +  
-    ylab(expression('Predicted 1m SOC % (MgC ha'^-1*')')) +
+    xlab(expression('Sampled horizon SOC stock (MgC ha'^-1*')')) +  
+    ylab(expression('Predicted horizon SOC stock (MgC ha'^-1*')')) +
     geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
     #xlim(-4, 5) +
     #ylim(-4, 5)  +
@@ -221,50 +216,7 @@ gam.vcomp(gam_mod$gam, conf.lev = .95)
 plot.gam(gam_mod$gam)
 
 
-########## Random Forest ############
-library(randomForest)
-set.seed(11)
 
-# Validation Set 
-train.index <- as.vector(sample(c(1:481), 337, replace=F))
-train <- wa_dat[train.index, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-test <- wa_dat[-train.index, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-
-train.indexw <- as.vector(sample(c(1:180), 126, replace=F))
-trainw <- wa_wet[train.indexw, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-testw <- wa_wet[-train.indexw, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-
-train.indexu <- as.vector(sample(c(1:301), 211, replace=F))
-trainu <- wa_dat[train.indexu, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-testu <- wa_dat[-train.indexu, c("SOC_stock", "WIP", "lithsum", "temp", "precip", "depth")]
-
-
-rf_model <- randomForest(log(SOC_stock) ~ .,
-                         ntree = 1000, importance = TRUE, data = train)
-rf_modelw <- randomForest(log(SOC_stock) ~ .,
-                         ntree = 1000, importance = TRUE, data = trainw)
-rf_modelu <- randomForest(log(SOC_stock) ~ .,
-                         ntree = 1000, importance = TRUE, data = trainu)
-
-
-rf_model
-rf_modelw
-rf_modelu
-
-plot(rf_model)
-plot(rf_modelw)
-plot(rf_modelu)
-
-varImpPlot(rf_model)
-varImpPlot(rf_modelw)
-varImpPlot(rf_modelu)
-
-rf.pred <- predict(rf_model, newdata = test)
-mean((rf.pred - log(test$SOC_stock))^2)
-rf.full <- predict(rf_model, newdata = wa_dat)
-
-plot(log(wa_dat$SOC_stock), rf.full)
-r.sq(log(wa_dat$SOC_stock), rf.full)
 
 ############# Boosted Regression Trees ##############
 library(gbm)

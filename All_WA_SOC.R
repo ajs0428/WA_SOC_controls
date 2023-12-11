@@ -43,10 +43,11 @@ wa_geo <- vect("WA_Geo/WA_Geology_100K.gpkg")
 wa_geo_df <- as.data.frame(wa_geo)
 wa_geo_proj <- terra::project(wa_geo, "EPSG:26910")
 wa_pts_geo <- terra::extract(wa_geo_proj, wa_pts)
-wa_pts$age_lithol_extract <- wa_pts_geo$AGE_LITHOLOGY
-wa_pts$x <- wa$x.x
+wa_pts$age<- wa_pts_geo$GEOLOGIC_AGE
+wa_pts$x <- wa$x
 wa_pts$y <- wa$y
-write.csv(wa_pts, "SOIL CARBON/ANALYSIS/WA_SOC_pts_spec.csv")
+write.csv(wa_pts, "SOIL CARBON/ANALYSIS/WA_SOC_pts_spec_age.csv")
+names(wa_pts)
 #wa_geo_proj_lith <- wa_geo_proj["LITHOLOGY"]
 #geo_age_lith <- crop(wa_geo_proj, col_poly)
 # plot(hoh_geoage, type = "classes", "GEO_AGE_SUM")
@@ -118,9 +119,9 @@ wbt_geomorphons(
 # wa$geomorph <- wa_dat$geomorph
 
 #subset for easier viewing and access
-wa_dat <- wa |> dplyr::select( "site.x", "sample_name","CHN_30cm_Cstock_Mg_cm2",
+wa_dat <- wa_pts |> values() |> dplyr::select( "site", "sample_name","CHN_30cm_Cstock_Mg_cm2",
                                             "CHN_90cm_Cstock_Mg_ha",  "CHN_1m_Cstock_Mg_ha",   "CHN_120cm_Cstock_Mg_ha",
-                                            "WIP.x", "geo_extract.Label",  "hli.x" ) |>
+                                            "WIP", "age",  "hli" ) |>
     mutate_if(is.character, as.factor) |>
     stats::setNames(c("site", "name", "SOC30",
                       "SOC90",  "SOC1",   "SOC120",

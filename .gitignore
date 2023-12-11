@@ -1,3 +1,6 @@
 All_WA_SOC_cache/
 All_WA_SOC_files/
 *.log
+*.pdf
+*.tif
+*.xml
