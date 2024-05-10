@@ -1,4 +1,6 @@
 library(terra)
+library(ggplot2)
+library(rasterVis)
 library(aqp)
 library(ithir)
 library(mpspline2)

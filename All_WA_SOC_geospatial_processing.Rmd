@@ -31,7 +31,7 @@ library(dplyr)
 
 Soil pedon locations contain multiple observations per pedon, one for each horizon.
 
-```{r eval=FALSE}
+```{r}
 library(terra)
 library(tidyterra)
 
@@ -84,7 +84,7 @@ The `merge_wip` refers to the **Wetland Intrinsic Potential** (WIP) tool and is 
 *Halabisky, Meghan, Dan Miller, Anthony J. Stewart, Amy Yahnke, Daniel Lorigan, Tate Brasel, and Ludmila Monika Moskal. “The Wetland Intrinsic Potential Tool: Mapping Wetland Intrinsic Potential through Machine Learning of Multi-Scale Remote Sensing Proxies of Wetland Indicators.” Hydrology and Earth System Sciences 27, no. 20 (October 20, 2023): 3687–99. https://doi.org/10.5194/hess-27-3687-2023.*
 
 
-```{r eval=FALSE}
+```{r}
 #Merge Layers
 geomorph_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")#terra::merge(col_geomorph_cat, mas_geomorph_cat, hoh_geomorph_cat, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")
 hli_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")#terra::merge(col_hli, mas_hli, hoh_hli, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")
@@ -99,9 +99,12 @@ Here is a map of the Hoh River Watershed WIP, where `0.0 = 0% Wetland or Upland`
 ```{r echo=FALSE, message=FALSE}
 library(rasterVis)
 
-hohwip <- (rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_WIP_Mask0_10_2022.tif"))
+mas_wip <- rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_WIP_Final_2856.tif") #|> project("EPSG:2856")
+hoh_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_WIP_Mask0_10_2022.tif") |> project("EPSG:2855")
+col_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/colville_NWI_WIP_clip_INV.tif") |> project("EPSG:2855")
+
 colr <- colorRampPalette(RColorBrewer::brewer.pal(9, "YlGnBu"))
-levelplot(hohwip, margin = F, par.settings=list(
+levelplot(hoh_wip, margin = F, par.settings=list(
             axis.line=list(col='transparent') # suppress axes and legend outline
           ), scales=list(draw=FALSE), maxpixels = 9e5, 
           col.regions=colr)
@@ -112,9 +115,9 @@ More geospatial predictors from across WA state. This includes precipitation and
 
 *PRISM Climate Group, Oregon State University, https://prism.oregonstate.edu* 
 
-Spectral data are considered to approximate vegetation productivity and health. They are derived from Landsat median reflectance data collected over 2013-2022 and downloaded from Google Earth Engine.
 
-Geology data on geologic age and lithology are downloaded from the WA Dept. of Natural Resoures
+
+Geology data on geologic age and lithology are downloaded from the WA Dept. of Natural Resources
 
 ```{r eval=FALSE}
 #All WA layers
@@ -125,20 +128,70 @@ wa_temp <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA
 
 wa_geology <- vect("WA_Geo/ger_portal_surface_geology_100k/surface_geology_100k.gdb", layer = "geologic_unit_poly_100k") |> 
     terra::project("EPSG:26910") |> tidyterra::select(LITHOLOGY, GEOLOGIC_AGE)
+```
 
-wa_spec1 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000000000-0000000000.tif") 
-wa_spec2 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000000000-0000019968.tif")#
-wa_spec3 <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_region/WA_median_regions-0000006656-0000006656.tif")#
+Spectral data are considered to approximate vegetation productivity and health. They are derived from Landsat median reflectance data collected over June-September in the years 2014-2023 and downloaded from Google Earth Engine.
 
+```{r eval=FALSE}
+spec_list <- list.files("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_GEE_StudyAreas_Boxes/", pattern = ".tif", full.names = TRUE)
+
+hoh_poly <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/HOH_POLYGON_7_11_2022/HOH_POLYGON_711.gpkg") |> project("EPSG:2855")
+mas_poly <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/MAS_poly/mashel_poly.shp") |> project("EPSG:2856")
+col_poly <- vect("Colville/Colville_WIP_2024/DataExport/ColvilleHUC.shp") |> terra::aggregate() |> project("EPSG:2855")
+```
+
+
+```{r eval=FALSE}
+rast_list <- list()
+for(i in 1:length(spec_list)){
+    rast_list[[i]] <- rast(spec_list[[i]]) 
+}
+
+hoh_mas_spec2855 <- merge(rast_list[[2]], rast_list[[1]]) 
+hoh_box <- ext(-124.647030861616, -123.709196305401, 47.5021021439002, 47.9527148717352)
+hoh_spec <- crop(hoh_mas_spec2855, hoh_box) |> project("EPSG:2855") |> mask(mask = hoh_poly, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_Spec_Sum2014_2023.tif", overwrite = TRUE)
+
+mas_box <- ext(-122.390044402154, -121.895362438437, 46.7048642408074, 46.9405693599827)
+mas_spec <- crop(hoh_mas_spec2855, mas_box) |> project("EPSG:2856") |> mask(mask = mas_poly, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/Mas_Spec_Sum2014_2023.tif", overwrite = TRUE)
+
+col_spec <- rast_list[[3]] |> project("EPSG:2855") |> crop(y = col_poly, mask = TRUE, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/Col_Spec_Sum2014_2023.tif", overwrite = TRUE)
+
+
+```
+
+
+```{r eval=FALSE}
 wa_spec_merge <- terra::merge(wa_spec1, wa_spec2, wa_spec3, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_GEE_spec_median_merge.tif", overwrite = T) |>
     project("EPSG:26910")
+```
+
+
+```{r}
+wa_spec_merge <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_GEE_spec_median_merge.tif")
 ```
 
 ### Extraction
 
 The locations of the pedon observations are used to extract all geospatial metrics. 
 
-```{r eval=FALSE}
+```{r}
+wa <- readxl::read_xlsx("SOIL CARBON/ANALYSIS/All_PNW_horizons.xlsx")
+
+mas <- wa[wa$site == "MAS",]
+hoh_col <- wa[wa$site == "HOH" | wa$site == "COL", ]
+mas_pts <- vect(mas, geom = c("x", "y"), crs = "EPSG:26910") |> project("EPSG:2856")
+hoh_col_pts <- vect(hoh_col, geom = c("x", "y"), crs = "EPSG:26910") |> project("EPSG:2855")
+hoh_pts <- hoh_col_pts[hoh_col_pts$site == "HOH",]
+col_pts <- hoh_col_pts[hoh_col_pts$site == "COL",]
+
+
+```
+
+
+
+
+
+```{r}
 
 wa_geo_ext <- read.csv("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_geo_extract.csv")
 

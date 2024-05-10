@@ -87,3 +87,20 @@ write.csv(wa_spl_dat_0_30_60_100, file = "SOIL CARBON/ANALYSIS/R/WA_SOC_controls
 
 ```
 
+```{r}
+summary(lm(wa_spl_dat_0_30_60_100$SOC_stock_spline ~ wa_spl_dat_0_30_60_100$WIP + wa_spl_dat_0_30_60_100$site))
+
+plot(wa_spl_dat_0_30_60_100$WIP, wa_spl_dat_0_30_60_100$SOC_stock_spline)
+abline(0, 1)
+```
+
+```{r}
+test <- wa_spl_dat_0_30_60_100 |> filter(site == "MAS")
+summary(lm(test$SOC_stock_spline ~ test$WIP))
+
+plot(test$WIP, test$SOC_stock_spline)
+abline(0, 1)
+
+
+```
+

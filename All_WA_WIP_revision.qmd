@@ -1,0 +1,504 @@
+---
+title: "Creating Wetland Probability from ArcGIS outputs"
+format: html
+---
+
+```{r setup, include=FALSE}
+#| label: setup
+
+set.seed(11)
+library(formatR)
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 75)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = T, collapse = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(terra)
+library(tidyverse)
+library(tidyterra)
+library(randomForest)
+library(caret)
+library(leaflet)
+```
+
+Options for speed
+```{r}
+terraOptions(
+    memfrac = 0.1
+)
+```
+
+
+## Mashel Wetland Probability
+
+#### Data
+
+Rasters 
+```{r eval=FALSE}
+filepath <- "Mashel/Mashel_WIP_2024/DataExport"
+mas_dtw <- "Mashel/Mashel_WIP_2024/DataExport/Mashel_DTW.tif"
+
+tif_proc <- function(filepath, target_rast){
+    filelist <- list.files(filepath, pattern = ".tif$", full.names = TRUE) |> 
+    str_subset(pattern = "^(?!.*flow)") |>
+    str_subset(pattern = "^(?!.*fill)")  |>
+    str_subset(pattern = "^(?!.*slopetwi.tif)") |>
+    str_subset(pattern = "^(?!.*HUC12.tif)") |>
+    str_subset(pattern = "^(?!.*filled)") |> 
+    str_subset(pattern = "^(?!.*huc.tif)") |>
+    str_subset(pattern = "^(?!.*Mosaic)")
+    
+    for(i in 1:length(filelist)){
+        r <- rast(filelist[[i]])
+        crs_2856 <- rast(target_rast)
+        nameClean <- str_extract(filelist[[i]], pattern = "(?<=Export/)(.+)(?=.tif)")
+    
+        if(crs(r) != crs(crs_2856)){
+            project(x = r, y = crs_2856, 
+                    filename = paste0(filepath, "/",
+                                              nameClean, "_2856", ".tif"),
+                    overwrite = TRUE) 
+        } else {
+            next
+        }
+    }
+}
+
+tif_proc(filepath = filepath, target_rast = mas_dtw)
+
+```
+
+
+```{r}
+mas_files <- list.files(filepath, pattern = ".tif$", full.names = TRUE) |> 
+    # str_subset(pattern = "^(?!.*flow)") |> 
+    # str_subset(pattern = "^(?!.*filled)") |> 
+    # str_subset(pattern = "^(?!.*huc.tif)") |>
+    str_subset(pattern = "2856.tif") 
+
+mas_files
+```
+
+
+```{r}
+mas_rasts <- c(rast(mas_files[c(-8,-9)]), rast(mas_dtw), rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_DEM_HUC12_2856_4m_TWI.tif"), rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_DEM_HUC12_2856_4m.tif"))
+
+names(mas_rasts)
+names(mas_rasts[[7]]) <- "CHM"
+names(mas_rasts[[16]]) <- "DTW"
+names(mas_rasts[[17]]) <- "TWI"
+names(mas_rasts[[18]]) <- "DEM"
+```
+
+
+
+
+Training Points 
+```{r}
+mas_pts <- vect("Mashel/Mashel_WIP_2024/DataExport/Mashel_NWI_filter_train_pts.shp") |>
+    project("EPSG:2856")
+mas_pts
+```
+
+```{r}
+mas_pts_train <- terra::extract(mas_rasts, mas_pts, bind = TRUE, filename = "Mashel/Mashel_WIP_2024/DataExport/MashelNWI_pts_training.gpkg")
+
+mas_pts_train_df <- as.data.frame(mas_pts_train)
+```
+
+
+
+
+#### Random Forest Modeling
+```{r eval=TRUE}
+set.seed(11)
+
+rf_mod_func <- function(points){
+        train.index <- as.vector(sample(c(1:nrow(points)),
+                                        0.7*nrow(points), replace=F))
+        train <- points[train.index, ]
+        test <- points[-train.index, ]
+        
+        rf_model <- randomForest(as.factor(class) ~ ., mtry = 10, 
+                         sampsize = nrow(train[train$class == "WET",]),
+                         replace = TRUE, #weights = wetwt, 
+                         nodesize =1,
+                         ntree = 1000, na.action = na.omit,
+                         importance = TRUE, data = train)
+        
+        test_predict <- predict(rf_model, newdata = test, type = "response") 
+        cm <- caret::confusionMatrix(test_predict, as.factor(test$class))
+        return(list(test, rf_model, cm))
+}
+```
+
+
+```{r eval=FALSE}
+mas_model <- rf_mod_func(mas_pts_train_df)
+
+mas_rf <- mas_model[[2]]
+mas_test <- mas_model[[1]]
+mas_cm <- mas_model[[3]]
+mas_rf
+mas_cm
+
+```
+
+Model output
+
+
+#### WIP raster prediction
+```{r}
+#| eval: false
+mas_pred_wip <- terra::predict(mas_rasts, mas_rf, type = "prob", 
+                    filename = "Mashel/Mashel_WIP_2024/DataExport/Mashel_NWI_WIP_2856.tif", 
+                    overwrite = TRUE)
+```
+
+
+```{r}
+pred_wip <- rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_NWI_WIP_2856.tif")
+
+plot(pred_wip)
+```
+
+#### Stratified sample points across WIP
+
+Can be adapted to do evenly spread across all of WIP or weighted to 1:2 WET:UPL for final validation
+```{r}
+#| eval: false
+
+
+filepath <- "Mashel/Mashel_WIP_2024/DataExport"
+
+strat_pts <- function(wip_rast){
+    m <- c(0, 0.25, 1,
+           0.25, 0.5, 2,
+           0.5, 0.75, 3,
+           0.75, 1, 3)
+    rclmat <- matrix(m, ncol=3, byrow=TRUE)
+    wip_rcl <- classify(wip_rast$WET, rclmat, include.lowest=TRUE)
+    
+    wip_stratified_points <- spatSample(wip_rcl, size = 50, 
+                                        method = "stratified", 
+                                        as.points = TRUE, 
+                                        na.rm = TRUE)
+    writeVector(wip_stratified_points, 
+                paste0(filepath, "/", 
+                       deparse(substitute(wip_rast)), 
+                       "_NWI_stratified_points_validate_100wet", ".shp"),
+                overwrite = TRUE)
+    return(wip_stratified_points)
+}
+
+mas_strat_pts_valid <- strat_pts(wip_rast = pred_wip)
+
+
+```
+
+
+#### Bring stratified points back after reclassification in GIS
+
+```{r}
+mas_strat_pts_class <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_pred_wip_NWI_stratified_600points_class.shp")
+
+plot(mas_strat_pts_class, "validate", main = "Mashel User Classified Points")
+```
+
+
+Extract raster metrics again 
+
+```{r}
+mas_pts_train_2 <- mas_strat_pts_class |> select(validate) |> terra::extract(x = mas_rasts, bind = TRUE)
+writeVector(mas_pts_train_2, "Mashel/Mashel_WIP_2024/DataExport/mas_strat_pts_class_extmetrics.shp",
+            overwrite=TRUE)
+
+mas_pts_validate <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_pred_wip_NWI_stratified_points_validate.shp") |> select(validate) |> terra::extract(x = mas_rasts, bind = TRUE)
+writeVector(mas_pts_validate, "Mashel/Mashel_WIP_2024/DataExport/mas_pred_wip_NWI_stratified_points_validate_extract.shp",
+            overwrite = TRUE)
+
+```
+
+
+Rerun random forest algorithm 
+```{r}
+mas_pts_train_2_df <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_strat_pts_class_extmetrics.shp") |> as.data.frame() |> dplyr::rename("class" = "validate")
+mas_pts_validate_df <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_pred_wip_NWI_stratified_points_validate_extract.shp") |> as.data.frame() |> dplyr::rename("class" = "validate")
+```
+
+
+```{r}
+#| eval: false
+filepath2 <- "Mashel/Mashel_WIP_2024/Model_Export"
+
+rf_mod_func2 <- function(points, val_points, path){
+    set.seed(11)
+        #train.index <- points
+        train <- points
+        test <- val_points
+        
+        rf_model <- randomForest(as.factor(class) ~ ., mtry = 10, 
+                         sampsize = nrow(train[train$class == "WET",]),
+                         replace = TRUE,  
+                         nodesize =1,
+                         ntree = 1000, na.action = na.omit,
+                         importance = TRUE, data = train)
+        
+        test_predict <- predict(rf_model, newdata = test, type = "response") 
+        cm <- caret::confusionMatrix(test_predict, as.factor(test$class))
+        
+        save(rf_model, file = paste0(path, "/", 
+                       toupper(str_sub(deparse(substitute(val_points)),1,3)), 
+                       "_RF_Model_Final", ".RData"))
+        
+        return(list(test_predict, rf_model, cm))
+}
+
+
+
+mas_model_2 <- rf_mod_func2(mas_pts_train_2_df, mas_pts_validate_df, filepath2)
+```
+
+
+```{r}
+mas_rf_2 <- mas_model_2[[2]]
+mas_test_2 <- mas_model_2[[1]]
+mas_cm_2 <- mas_model_2[[3]]
+mas_rf_2
+mas_cm_2
+varImpPlot(mas_rf_2)
+```
+
+
+```{r}
+mas_pred_wip_final <- terra::predict(mas_rasts, mas_rf_2, type = "prob", 
+                    filename = "Mashel/Mashel_WIP_2024/DataExport/Mashel_WIP_Final_2856.tif", 
+                    overwrite = TRUE)
+```
+
+```{r}
+#| cache: true
+
+
+mas_wip_final <- rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_WIP_Final_2856.tif")[[2]]
+
+pal <- colorNumeric("YlGnBu", values(mas_wip_final),
+  na.color = "transparent")
+
+leaflet::leaflet() |> 
+    addProviderTiles(providers$Esri.WorldImagery) |> 
+    addRasterImage(mas_wip_final, group = "Mashel WIP", colors = pal,
+                   maxBytes = 20630008) |> 
+    addLayersControl(overlayGroups = c("Mashel WIP")) |>
+    addLegend(pal = pal, values = values(mas_pred_wip_final))
+```
+
+
+## Colville WIP 
+
+```{r}
+col_files <- list.files("Colville/Colville_WIP_2024/DataExport", pattern = ".tif$", full.names = TRUE) |> 
+    str_subset(pattern = "^(?!.*flow)") |> 
+    str_subset(pattern = "^(?!.*filled)") |> 
+    str_subset(pattern = "^(?!.*huc.tif)") |>
+    str_subset(pattern = "2855.tif") 
+
+# for(i in 1:length(col_files)){
+#     r <- rast(col_files[[i]])
+#     crs_2855 <- crs(rast(col_files[[1]]))
+#     nameClean <- str_extract(col_files[[i]], pattern = "(?<=Export/)(.+)(?=.tif)")
+#     
+#     if(crs(r) != crs_2855){
+#         project(r, crs_2855, 
+#                 filename = paste0("Colville/Colville_WIP_2024/DataExport/",
+#                                           nameClean, "_2855", ".tif"))
+#     } else {
+#         next
+#     }
+# }
+
+col_files
+```
+
+
+```{r}
+col_twi <- rast("Colville/Colville_WIP_2024/DataExport/colvilledem_TWI.tif") 
+col_dtw <- rast("Colville/Colville_WIP_2024/DataExport/Colville_DTW.tif")
+names(col_twi) <- "TWI"
+names(col_dtw) <- "DTW"
+col_rasts <- c(rast(col_files), col_twi, col_dtw)
+names(col_rasts[[3]]) <- "DEM"
+```
+
+
+```{r}
+col_pts <- vect("Colville/Colville_WIP_2024/DataExport/ColvilleNWI_pts_merge.shp")
+col_pts
+```
+
+```{r}
+col_pts_train <- terra::extract(col_rasts, col_pts, bind = TRUE, filename = "Colville/Colville_WIP_2024/DataExport/ColvilleNWI_pts_merge_training.gpkg")
+
+col_pts_train_df <- as.data.frame(col_pts_train)
+```
+
+
+```{r}
+col_model <- rf_mod_func(col_pts_train_df)
+
+col_rf <- col_model[[2]]
+col_test <- col_model[[1]]
+col_cm <- col_model[[3]]
+col_rf
+col_cm
+```
+
+#### NWI-based WIP model prediction to raster map
+
+```{r}
+#| eval: false
+
+col_pred_wip <- predict(col_rasts, col_rf, type = "prob", 
+                    filename = "Colville/Colville_WIP_2024/DataExport/Colville_NWI_WIP.tif", 
+                    overwrite = TRUE)
+```
+
+
+```{r}
+col_pred_wip <- rast("Colville/Colville_WIP_2024/DataExport/Colville_NWI_WIP.tif")
+plot(col_pred_wip)
+```
+
+#### Stratify points across NWI-based WIP model prediction 
+
+
+
+```{r}
+filepath <- "Colville/Colville_WIP_2024/DataExport/"
+
+strat_pts <- function(wip_rast){
+    m <- c(0, 0.25, 1,
+           0.25, 0.5, 2,
+           0.5, 0.75, 3,
+           0.75, 1, 4)
+    rclmat <- matrix(m, ncol=3, byrow=TRUE)
+    wip_rcl <- classify(wip_rast$WET, rclmat, include.lowest=TRUE)
+    
+    wip_stratified_points <- spatSample(wip_rcl, size = 150, 
+                                        method = "stratified", 
+                                        as.points = TRUE, 
+                                        na.rm = TRUE,
+                                        exp = 10)
+    writeVector(wip_stratified_points, 
+                paste0(filepath, 
+                       deparse(substitute(wip_rast)), 
+                       "_NWI_stratified_points_validate", ".shp"),
+                overwrite = TRUE)
+    return(wip_stratified_points)
+}
+
+col_strat_pts_valid <- strat_pts(wip_rast = col_pred_wip)
+
+plot(col_strat_pts_valid, "WET")
+```
+
+Also do this to make a separate test dataset of 300 points (100 Wet 200 Upl)
+
+```{r}
+strat_pts_test <- function(wip_rast){
+    set.seed(11)
+    m <- c(0, 0.25, 1,
+           0.25, 0.5, 2,
+           0.5, 0.75, 3,
+           0.75, 1, 3)
+    rclmat <- matrix(m, ncol=3, byrow=TRUE)
+    wip_rcl <- classify(wip_rast$WET, rclmat, include.lowest=TRUE)
+    
+    wip_stratified_points <- spatSample(wip_rcl, size = 100, 
+                                        method = "stratified", 
+                                        as.points = TRUE, 
+                                        na.rm = TRUE,
+                                        exp = 10)
+    writeVector(wip_stratified_points, 
+                paste0(filepath, 
+                       deparse(substitute(wip_rast)), 
+                       "_NWI_stratified_points_test", ".shp"),
+                overwrite = TRUE)
+    return(wip_stratified_points)
+}
+
+col_strat_pts_test <- strat_pts_test(wip_rast = col_pred_wip)
+col_strat_pts_test
+plot(col_strat_pts_test, "WET")
+```
+
+
+#### Bring stratified points back after reclassification in GIS
+
+```{r}
+col_strat_pts_test <- vect("Colville/Colville_WIP_2024/DataExport/col_pred_wip_NWI_stratified_points_validate.shp")
+
+plot(col_strat_pts_test, "validate", main = "Colville User Classified Points")
+```
+
+
+Extract raster metrics again 
+
+```{r}
+col_pts_train_2 <- col_strat_pts_class |> dplyr::select(validate) |> terra::extract(x = col_rasts, bind = TRUE)
+writeVector(col_pts_train_2, "Colville/Colville_WIP_2024/DataExport/col_strat_pts_class_extmetrics.shp",
+            overwrite=TRUE)
+
+col_pts_test <- vect("Colville/Colville_WIP_2024/DataExport/col_pred_wip_NWI_stratified_points_validate.shp") |> dplyr::select(validate) |> terra::extract(x = col_rasts, bind = TRUE)
+writeVector(col_pts_test, "Colville/Colville_WIP_2024/DataExport/col_pred_wip_NWI_stratified_points_validate_extract.shp",
+            overwrite = TRUE)
+
+```
+
+
+Rerun random forest algorithm 
+```{r}
+mas_pts_train_2_df <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_strat_pts_class_extmetrics.shp") |> as.data.frame() |> dplyr::rename("class" = "validate")
+mas_pts_validate_df <- vect("Mashel/Mashel_WIP_2024/DataExport/mas_pred_wip_NWI_stratified_points_validate_extract.shp") |> as.data.frame() |> dplyr::rename("class" = "validate")
+```
+
+
+```{r}
+#| eval: false
+filepath2 <- "Mashel/Mashel_WIP_2024/Model_Export"
+
+rf_mod_func2 <- function(points, val_points, path){
+    set.seed(11)
+        #train.index <- points
+        train <- points
+        test <- val_points
+        
+        rf_model <- randomForest(as.factor(class) ~ ., mtry = 10, 
+                         sampsize = nrow(train[train$class == "WET",]),
+                         replace = TRUE,  
+                         nodesize =1,
+                         ntree = 1000, na.action = na.omit,
+                         importance = TRUE, data = train)
+        
+        test_predict <- predict(rf_model, newdata = test, type = "response") 
+        cm <- caret::confusionMatrix(test_predict, as.factor(test$class))
+        
+        save(rf_model, file = paste0(path, "/", 
+                       toupper(str_sub(deparse(substitute(val_points)),1,3)), 
+                       "_RF_Model_Final", ".RData"))
+        
+        return(list(test_predict, rf_model, cm))
+}
+
+
+
+mas_model_2 <- rf_mod_func2(mas_pts_train_2_df, mas_pts_validate_df, filepath2)
+```
+
+
+```{r}
+mas_rf_2 <- mas_model_2[[2]]
+mas_test_2 <- mas_model_2[[1]]
+mas_cm_2 <- mas_model_2[[3]]
+mas_rf_2
+mas_cm_2
+varImpPlot(mas_rf_2)
+```
