@@ -3,6 +3,7 @@ title: 'Data processing for geospatial predictors'
 author: "Anthony Stewart"
 output: html_document
 ---
+
 ```{css, echo=FALSE}
 pre {
   max-height: 300px;
@@ -14,7 +15,6 @@ h1, h4, h3 {
 }
 ```
 
-
 ```{r setup, include=FALSE}
 library(formatR)
 knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 75)
@@ -25,192 +25,561 @@ library(aqp)
 library(ithir)
 library(mpspline2)
 library(dplyr)
+library(spatialEco)
+library(whitebox)
+library(stringr)
+
+#setGDALconfig("GDAL_PAM_ENABLED", "FALSE")
+
+terraOptions(
+    memfrac = 0.1
+)
 ```
+
+### Raster and Vector data
+
+#### Additional terrain variables
+
+In particular,
+
+-   DEM elevation is a proxy for local climate variation
+-   Heat Load Index (HLI) As an estimate of solar radiation intesity
+-   landform classification from `geomorphons` is derived using **Whitebox Tools** which implements the algorithm from *Jasiewicz, J., and Stepinski, T. F. (2013). Geomorphons — a pattern recognition approach to classification and mapping of landforms. Geomorphology, 182, 147-156.*
+-   
+
+```{r}
+terrain_metrics <- function(DEM, path, studyarea){
+  stopifnot(file.exists(paste0(path, studyarea, "_HLI", ".tif")) ==FALSE)
+  stopifnot(file.exists(paste0(getwd(), "/", path, studyarea, "_geomorphons", ".tif")) == FALSE)
+  
+  hli <- spatialEco::hli(DEM, force.hemisphere = "northern")
+  writeRaster(hli, names = "HLI", 
+              paste0(path, studyarea, "_HLI", ".tif"),
+              overwrite = TRUE)
+  #geomorphons
+  whitebox::wbt_geomorphons(
+    dem = sources(DEM),
+    output = paste0(getwd(), "/", path, studyarea, "_geomorphons", ".tif"),
+    search = 100
+  ) 
+    
+}
+```
+
+```{r}
+path <- "SOIL CARBON/All_WA/data/Rasters/"
+col_dem <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_dem_huc2855.tif")
+mas_dem <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_DEM_HUC12_2856_4m.tif")
+hoh_dem <- rast("SOIL CARBON/All_WA/data/Rasters/hoh_dem_2855.tif")
+```
+
+
+```{r eval=FALSE}
+terrain_metrics(col_dem, path, "Colville")
+terrain_metrics(mas_dem, path, "Mashel")
+terrain_metrics(hoh_dem, path, "Hoh")
+```
+
+#### Other Geospatial Predictors
+
+```{r}
+col_studyarea <- vect("SOIL CARBON/All_WA/data/Vectors/ColvilleHUC_2855.shp") 
+mas_studyarea <- vect("SOIL CARBON/All_WA/data/Vectors/Mashel_HUC12_2856.shp")
+hoh_studyarea <- vect("SOIL CARBON/All_WA/data/Vectors/HOH_POLYGON_711.shp")
+```
+
+Geology from the Washington Dept. of Natural Resources 
+
+```{r eval=FALSE}
+wa_geology <- vect("WA_Geo/WA_Geology_100K.gpkg") |> tidyterra::select(GEOLOGIC_AGE)
+
+crop(wa_geology, project(hoh_studyarea, wa_geology)) |> 
+  project("EPSG:2855") |> 
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Hoh_geology.shp")
+
+crop(wa_geology, project(mas_studyarea, wa_geology)) |> 
+  project("EPSG:2856") |> 
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Mashel_geology.shp")
+
+crop(wa_geology, project(col_studyarea, wa_geology)) |>
+  project("EPSG:2855") |> 
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Colville_geology.shp")
+
+```
+
+
+Consolidate the levels in Geologic age to be more broad because our samples did not cover some categories 
+
+- Quaternary
+  - Quaternary
+  - Present 
+- Pleistocene
+  - Pleistocene
+- Miocene
+  - Miocene, 
+  - Miocene-Oligocene
+  - Miocene, middle to upper
+- Eocene
+  - Miocene-Eocene
+  - Eocene
+  - Oligocene-Eocene
+- PreTertiary
+  - Traissic-Permian
+  - pre-Tertiary
+  - Permian
+
+
+
+```{r eval=FALSE}
+hoh_consolidate_geo <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_geology.shp") |> 
+  tidyterra::mutate(GEO = case_when(GEOLOGIC_A == "Miocene-Eocene" ~ "Eocene",
+                                    GEOLOGIC_A == "Miocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Present" ~ "Quaternary",
+                                    .default = GEOLOGIC_A))
+mas_consolidate_geo <- vect("SOIL CARBON/All_WA/data/Vectors/Mashel_geology.shp") |> 
+  tidyterra::mutate(GEO = case_when(GEOLOGIC_A == "Miocene-Eocene" ~ "Eocene",
+                                    GEOLOGIC_A == "Miocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Eocene" ~ "Eocene",
+                                    GEOLOGIC_A == "Miocene, middle to upper" ~ "Miocene",
+                                    GEOLOGIC_A == "Miocene-Oligocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Oligocene-Eocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Present" ~ "Quaternary",
+                                    .default = GEOLOGIC_A))
+col_consolidate_geo <- vect("SOIL CARBON/All_WA/data/Vectors/Colville_geology.shp") |> 
+  tidyterra::mutate(GEO = case_when(GEOLOGIC_A == "Traissic-Permian" ~ "PreTertiary",
+                                    GEOLOGIC_A == "Miocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Eocene" ~ "Eocene",
+                                    GEOLOGIC_A == "pre-Tertiary" ~ "PreTertiary",
+                                    GEOLOGIC_A == "Permian" ~ "PreTertiary",
+                                    GEOLOGIC_A == "	Oligocene-Eocene" ~ "Miocene",
+                                    GEOLOGIC_A == "Present" ~ "Quaternary",
+                                    .default = GEOLOGIC_A))
+
+writeVector(hoh_consolidate_geo, "SOIL CARBON/All_WA/data/Vectors/Hoh_geology_consolidate.shp",overwrite = TRUE)
+writeVector(mas_consolidate_geo, "SOIL CARBON/All_WA/data/Vectors/Mas_geology_consolidate.shp",overwrite = TRUE)
+writeVector(col_consolidate_geo, "SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate.shp",overwrite = TRUE)
+```
+
+
+```{r}
+hoh_allgeolevels <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_geology_consolidate.shp") |>
+   tidyterra::select(GEO)
+mas_allgeolevels <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_geology_consolidate.shp")|>
+   tidyterra::select(GEO) 
+col_allgeolevels <- vect("SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate.shp")|>
+   tidyterra::select(GEO)
+
+```
+
+
+Create Rasters from Geology
+
+```{r eval=TRUE}
+
+hoh_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_geology_consolidate.shp") |>
+  terra::rasterize(y = hoh_dem, field = "GEO", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Hoh_geology.tif", overwrite = TRUE)
+
+mas_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_geology_consolidate.shp")|>
+  terra::rasterize(y = mas_dem, field = "GEO", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Mashel_geology.tif", overwrite = TRUE)
+
+col_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate.shp") |>
+  terra::rasterize(y = col_dem, field = "GEO", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Colville_geology.tif", overwrite = TRUE)
+
+```
+
+
+```{r}
+
+hoh_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_geology.tif")
+mas_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_geology.tif")
+col_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_geology.tif")
+
+```
+
+Lithology from the Global Lithological Map
+
+- See a thesis from Jansen 2010
+
+```{r eval=FALSE}
+
+GLiM <- vect("SOIL CARBON/All_WA/data/Vectors/LiMW_GIS 2015.gdb") |> select(Litho) 
+
+col_lithol <- crop(GLiM, project(col_studyarea, "ESRI:54012")) |> project("EPSG:2855") |> writeVector("SOIL CARBON/All_WA/data/Vectors/Colville_lithol.shp")
+mas_lithol <- crop(GLiM, project(mas_studyarea, "ESRI:54012")) |> project("EPSG:2856") |> writeVector("SOIL CARBON/All_WA/data/Vectors/Mashel_lithol.shp")
+hoh_lithol <- crop(GLiM, project(hoh_studyarea, "ESRI:54012")) |> project("EPSG:2855") |> writeVector("SOIL CARBON/All_WA/data/Vectors/Hoh_lithol.shp")
+```
+
+
+Floodplains
+
+Nardi et al., 2019 GFPLAIN250m, a global high-resolution dataset of Earth’s floodplains
+
+```{r eval=FALSE}
+flood <- rast("SOIL CARBON/Floodplain/GFPLAIN TIFF/NA/NA.TIF")
+
+col_flood <- crop(flood, project(col_studyarea, flood), mask = TRUE) |> project("EPSG:2855") |> writeRaster("SOIL CARBON/All_WA/data/Vectors/Colville_flood.tif", overwrite = TRUE)
+mas_flood <- crop(flood, project(mas_studyarea, flood), mask = TRUE) |> project("EPSG:2856") |> writeRaster("SOIL CARBON/All_WA/data/Vectors/Mashel_flood.tif", overwrite = TRUE)
+hoh_flood <- crop(flood, project(hoh_studyarea, flood), mask = TRUE) |> project("EPSG:2855") |> writeRaster("SOIL CARBON/All_WA/data/Vectors/Hoh_flood.tif", overwrite = TRUE)
+```
+
+Spectral metrics from Sentinel-2. The median reflectance over summer months (July-Sept) from 2018-2023 
+    -   NDVI
+    -   MNDWI
+    -   NDYI
+    -   EVI
+    
+```{r eval=FALSE}
+spectral_mosaic <- rast("SOIL CARBON/All_WA/data/Rasters/Sentinel2_mosaic.tif")
+  
+col_spectral <- crop(spectral_mosaic, project(col_studyarea, spectral_mosaic), mask = TRUE) |> project("EPSG:2855") |> writeRaster("SOIL CARBON/All_WA/data/Rasters/Colville_spectral.tif", overwrite = TRUE)
+mas_spectral <- crop(spectral_mosaic, project(mas_studyarea, spectral_mosaic), mask = TRUE) |> project("EPSG:2856") |> writeRaster("SOIL CARBON/All_WA/data/Rasters/Mashel_spectral.tif", overwrite = TRUE)
+hoh_spectral <- crop(spectral_mosaic, project(hoh_studyarea, spectral_mosaic), mask = TRUE) |> project("EPSG:2855") |> writeRaster("SOIL CARBON/All_WA/data/Rasters/Hoh_spectral.tif", overwrite = TRUE)
+```
+
+Canopy Height
+
+```{r fig.show='hold', out.width="30%"}
+hoh_chm <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_CanopyHeight_2855.tif") 
+mas_chm <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_CanopyHeight_2856.tif")
+col_chm <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_CanopyHeight_2856.tif")
+
+plot(hoh_chm) 
+plot(mas_chm)
+plot(col_chm) 
+```
+
+Climate data from WorldClim
+
+- Use CHM as reference
+
+```{r}
+prism_ppt <- rast("PRISM_Climate/PRISM_ppt_30yr_normal_800mM4_annual_asc/PRISM_ppt_30yr_normal_800mM4_annual_asc.asc")
+prism_temp <- rast("PRISM_Climate/PRISM_tmean_30yr_normal_800mM4_annual_asc/PRISM_tmean_30yr_normal_800mM4_annual_asc.asc")
+prism_vpd <- rast("PRISM_Climate/PRISM_vpdmax_30yr_normal_800mM5_annual_asc/PRISM_vpdmax_30yr_normal_800mM5_annual_asc.asc")
+
+prism_clim <- c(prism_ppt, prism_temp, prism_vpd)
+names(prism_clim) <- c("MAP", "MAT", "VPD")
+
+#wa_clim_prj <- project(prism_clim, "EPSG:4326")
+mas_studyareabuff <- buffer(terra::aggregate(mas_studyarea), 1000)
+
+hoh_clim <- crop(prism_clim, project(hoh_studyarea, "EPSG:4326")) |> 
+  project("EPSG:2855") |>
+  crop(y = project(hoh_studyarea, "EPSG:2855"), mask = TRUE) |> 
+  resample(y = hoh_chm) |> 
+  mask(mask = hoh_chm, filename = "SOIL CARBON/All_WA/data/Rasters/hoh_climate_data.tif", overwrite = TRUE)
+
+mas_clim <- crop(prism_clim, project(mas_studyareabuff, "EPSG:4326"), touches = F, extend = TRUE) |> 
+  project("EPSG:2856") |>
+  crop(y = project(mas_studyarea, "EPSG:2856"), mask = TRUE) |> 
+  resample(y = mas_chm) |> 
+  mask(mask = mas_chm, filename = "SOIL CARBON/All_WA/data/Rasters/mashel_climate_data.tif", overwrite = TRUE)
+
+col_clim <- crop(prism_clim, project(col_studyarea, "EPSG:4326")) |> 
+  project("EPSG:2855") |>
+  crop(y = project(col_studyarea, "EPSG:2855"), mask = TRUE) |> 
+  resample(y = col_chm) |> 
+  mask(mask = col_chm, filename = "SOIL CARBON/All_WA/data/Rasters/colville_climate_data.tif", overwrite = TRUE)
+```
+
+```{r}
+hoh_clim <- rast("SOIL CARBON/All_WA/data/Rasters/hoh_climate_data.tif")
+mas_clim <- rast("SOIL CARBON/All_WA/data/Rasters/mashel_climate_data.tif")
+col_clim <- rast("SOIL CARBON/All_WA/data/Rasters/colville_climate_data.tif")
+```
+
+
+LANDFIRE existing vegetation type 
+
+```{r eval=FALSE}
+
+lf_classes <- read.csv("SOIL CARBON/All_WA/data/dataframes/WA_LandFire_Classes.csv") |> select(-X) |> select(values, names) 
+lf_mat <- matrix(c(lf_classes[[1]], lf_classes[[2]]), ncol = 2)
+lf_wa <- rast("SOIL CARBON/All_WA/data/WA_GEE_Data/WA_LandFire_2014.tif") |> 
+  terra::as.factor()
+
+
+lf_wa_rcl <- mask(lf_wa, lf_wa >= 3001, maskvalues = FALSE, updatevalue = NA) 
+#plot(lf_wa_rcl)
+
+hoh_studyarea_4326 <- project(hoh_studyarea, "EPSG:4326")
+mas_studyarea_4326 <- project(mas_studyarea, "EPSG:4326")
+col_studyarea_4326 <- project(col_studyarea, "EPSG:4326")
+
+lf_hoh <- crop(lf_wa_rcl, hoh_studyarea_4326, mask = TRUE) |>
+  project("EPSG:2855") |>
+  resample(y = hoh_chm, method = "near") |>
+  mask(mask = hoh_chm, filename = "SOIL CARBON/All_WA/data/Rasters/hoh_LANDFIRE.tif", overwrite = TRUE)
+lf_mas <- crop(lf_wa_rcl, mas_studyarea_4326, mask = TRUE)|>
+  project("EPSG:2856") |>
+  resample(y = mas_chm, method = "near") |> 
+  mask(mask = mas_chm, filename = "SOIL CARBON/All_WA/data/Rasters/mashel_LANDFIRE.tif", overwrite = TRUE)
+lf_col <- crop(lf_wa_rcl, col_studyarea_4326, mask = TRUE) |>
+  project("EPSG:2855") |>
+  resample(y = col_chm, method = "near") |> 
+  mask(mask = col_chm, filename = "SOIL CARBON/All_WA/data/Rasters/colville_LANDFIRE.tif", overwrite = TRUE)
+
+
+lf_hoh_classes <- levels(lf_hoh)[[1]] |> as_tibble() |> 
+  left_join(y = lf_classes, by = join_by(ID == values)) |> select(-EVT) |> 
+  mutate(names = case_when(
+    str_detect(names, pattern = fixed("spruce", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("hemlock", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("fir", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("pine", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("conifer", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("shrub", ignore_case = T)) ~ "Shrubland",
+      str_detect(names, pattern = fixed("sagebrush", ignore_case = T)) ~ "Shrubland",
+      str_detect(names, pattern = fixed("grass", ignore_case = T)) ~ "Herbaceous",
+      str_detect(names, pattern = fixed("Tsuga", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("larch", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("Oak", ignore_case = T)) ~ "Deciduous",
+      str_detect(names, pattern = fixed("Deciduous", ignore_case = T)) ~ "Deciduous",
+      str_detect(names, pattern = fixed("Evergreen", ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = fixed("Mixed", ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = fixed("Sparse", ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = fixed("Aspen", ignore_case = T)) ~ "Deciduous",
+      str_detect(names, pattern = fixed("Mahogany", ignore_case = T)) ~ "Deciduous",
+      str_detect(names, pattern = fixed("Savanna", ignore_case = T)) ~ "Herbaceous",
+      str_detect(names, pattern = fixed("Riparian", ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = fixed("swamp", ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = fixed("Volcanic", ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = fixed("Herbaceous", ignore_case = T)) ~ "Herbaceous",
+    .default = names))
+
+lf_hoh_names <- categories(lf_hoh, layer=1, value = lf_hoh_classes, active = 1)
+coltab(lf_hoh_names) <- NULL
+plot(lf_hoh_names)
+```
+
+```{r}
+lf_hoh <- rast("SOIL CARBON/All_WA/data/Rasters/hoh_LANDFIRE.tif")
+lf_mas <- rast("SOIL CARBON/All_WA/data/Rasters/mashel_LANDFIRE.tif")
+lf_col <-rast("SOIL CARBON/All_WA/data/Rasters/colville_LANDFIRE.tif")
+```
+
+
+
+WIP or The **Wetland Intrinsic Potential** (WIP) is derived from implementing the methodology described in *Halabisky, Meghan, Dan Miller, Anthony J. Stewart, Amy Yahnke, Daniel Lorigan, Tate Brasel, and Ludmila Monika Moskal. “The Wetland Intrinsic Potential Tool: Mapping Wetland Intrinsic Potential through Machine Learning of Multi-Scale Remote Sensing Proxies of Wetland Indicators.” Hydrology and Earth System Sciences 27, no. 20 (October 20, 2023): 3687–99. <https://doi.org/10.5194/hess-27-3687-2023>.*
+
+The  WIP of the Hoh River Watershed is taken from Halabisky et al., 2023. Colville and Mashel WIP models were derived using the same approach and shown in the R-Quarto Document `All_WA_WIP_revision.qmd`
+
+#### Non-predictor geospatial data
+
+Hansen forest disturbance maps. 
+
+- Was there forest disturbance in the last 20 years? 
+
+```{r}
+
+```
+
+National wetland condition assessment (NWCA) mapping dataset from Uhran et al., 2021
+
+```{r eval=FALSE}
+CONUS_NWCA_Mean <- rast("NWCA Data/CONUS_Stock_Nov_20/CONUS_Full_Stock_Mean.tif")
+CONUS_NWCA_Max <- rast("NWCA Data/CONUS_Stock_Nov_20/CONUS_Full_Stock_Max.tif")
+CONUS_NWCA_Min <- rast("NWCA Data/CONUS_Stock_Nov_20/CONUS_Full_Stock_Max.tif")
+
+NWCA_extract <- function(CONUS_NWCA_raster, studyarea, ref_raster, path, type){
+  name <- str_extract(deparse(substitute(studyarea)), "hoh|mas|col")
+  type <- tools::toTitleCase(type)
+  
+  studyarea_prj <- project(studyarea, CONUS_NWCA_raster)
+  
+  NWCA <- crop(CONUS_NWCA_raster, studyarea_prj, mask = TRUE) |>
+  project(y = ref_raster, threads = TRUE,
+          filename = paste0(path, "NonPredictors/", name, "_NWCA_Full_", type, ".tif"),
+          overwrite = TRUE)
+  return(NWCA)
+}
+
+hoh_NWCA <- NWCA_extract(CONUS_NWCA_Mean, hoh_studyarea, hoh_chm, path, "Mean")
+mas_NWCA <- NWCA_extract(CONUS_NWCA_Mean, mas_studyarea, mas_chm, path, "Mean")
+col_NWCA <- NWCA_extract(CONUS_NWCA_Mean, col_studyarea, col_chm, path, "Mean")
+
+hoh_NWCA <- NWCA_extract(CONUS_NWCA_Max, hoh_studyarea, hoh_chm, path, "Max")
+mas_NWCA <- NWCA_extract(CONUS_NWCA_Max, mas_studyarea, mas_chm, path, "Max")
+col_NWCA <- NWCA_extract(CONUS_NWCA_Max, col_studyarea, col_chm, path, "Max")
+
+hoh_NWCA <- NWCA_extract(CONUS_NWCA_Min, hoh_studyarea, hoh_chm, path, "Min")
+mas_NWCA <- NWCA_extract(CONUS_NWCA_Min, mas_studyarea, mas_chm, path, "Min")
+col_NWCA <- NWCA_extract(CONUS_NWCA_Min, col_studyarea, col_chm, path, "Min")
+```
+
+
+
+#### Raster Stack Processing
+
+- Resample to resolution of WIP output maps 
+
+```{r}
+col_wip <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_WIP_Final_2855.tif")[[2]]
+mas_wip <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_WIP_Final_2856.tif")[[2]]
+hoh_wip <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_WIP_Final_2855.tif")
+```
+
+
+
+```{r}
+stack_resampling <- function(Watershed, WIP, path) {
+  # stopifnot(file.exists(paste0(getwd(), 
+  #                              "/", 
+  #                              path, 
+  #                              Watershed, 
+  #                              "_PredictorStack", 
+  #                              ".tif")) == FALSE)
+            
+  filelist <- list.files("SOIL CARBON/All_WA/data/Rasters/", 
+                         pattern = Watershed, full.names = TRUE,
+                         ignore.case = TRUE,
+                         include.dirs = FALSE) |> 
+              str_subset(pattern = "^(?!.*flood)") |>
+              str_subset(pattern = "^(?!.*aux.xml)") |>
+              str_subset(pattern = "^(?!.*Mask.tif)") |>
+              str_subset(pattern = "^(?!.*hillshade)") |>
+              str_subset(pattern = "^(?!.*slpasp)") |>
+              str_subset(pattern = "^(?!.*fullmodel_v08)")
+  f <- lapply(filelist, terra::rast)
+  
+  rs <- list()
+  for (i in 1:length(f)) {
+    if(res(f[[i]])[[1]] != res(WIP)[[1]]){
+      rs[[i]] <- resample(f[[i]], WIP, method='near', 
+                         threads=TRUE)
+    } else {
+      rs[[i]] <- f[[i]]
+    }
+  }
+  
+  s <- rast(rs)
+  writeRaster(s, paste0(getwd(), 
+                               "/", 
+                               path, 
+                               Watershed, 
+                               "_PredictorStack", 
+                               ".tif"), overwrite = TRUE)
+  return(s)
+}
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+list.files("SOIL CARBON/All_WA/data/Rasters", 
+                         pattern = "Colville", full.names = TRUE,
+                         ignore.case = TRUE,
+                         include.dirs = FALSE) |> 
+              str_subset(pattern = "^(?!.*flood)") |>
+              str_subset(pattern = "^(?!.*aux.xml)") |>
+              str_subset(pattern = "^(?!.*Mask.tif)") |>
+              str_subset(pattern = "^(?!.*hillshade)") |>
+              str_subset(pattern = "^(?!.*slpasp)") |>
+              str_subset(pattern = "^(?!.*fullmodel_v08)")
+```
+
+
+```{r eval=FALSE}
+predpath <- "SOIL CARBON/All_WA/data/Rasters/PredictorStacks/"
+hoh_stack <- stack_resampling("Hoh", hoh_wip, predpath)
+mas_stack <- stack_resampling("Mashel", mas_wip, predpath)
+col_stack <- stack_resampling("Colville", col_wip, predpath)
+
+```
+
+Review stacks
+
+```{r}
+hoh_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack.tif") |>
+  tidyterra::rename(DTM = hoh_dtm_resamp_7_23,
+                    geomorphons = Hoh_geomorphons,
+                    WIP = WET,
+                    CHM = Hoh_CanopyHeight) 
+
+writeRaster(hoh_stack, "SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack_Class.tif", overwrite = TRUE)
+  
+mas_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mashel_PredictorStack.tif") |> tidyterra::select(-UPL) |>
+  tidyterra::rename(DTM = Band_1,
+                    geomorphons = Mashel_geomorphons,
+                    WIP = WET,
+                    CHM = lewis_2009_dsm_46)
+
+writeRaster(mas_stack, "SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mas_PredictorStack_Class.tif", overwrite = TRUE)
+
+col_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Colville_PredictorStack.tif") |> tidyterra::select(-UPL) |>
+  tidyterra::rename(DTM = ColvilleDEM,
+                    geomorphons = Colville_geomorphons,
+                    WIP = WET,
+                    CHM = colville_2008_dsm_0)
+
+writeRaster(col_stack, "SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Col_PredictorStack_Class.tif", overwrite = TRUE)
+```
+
+
+```{r}
+hoh_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack_Class.tif")
+mas_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mas_PredictorStack_Class.tif")
+col_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Col_PredictorStack_Class.tif")
+
+names(hoh_stack) == names(mas_stack) & names(hoh_stack)  == names(col_stack)
+
+hoh_stack$GEO <- subst(hoh_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary")) 
+mas_stack$GEO <- subst(mas_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary")) 
+col_stack$GEO <- subst(col_stack$GEO, from = c(0,1,2,3), c("Eocene", "Pleistocene", "PreTertiary", "Quaternary")) 
+```
+
 
 ### Point Data
 
 Soil pedon locations contain multiple observations per pedon, one for each horizon.
 
 ```{r}
-library(terra)
-library(tidyterra)
-
-wa_dat <- read.csv("SOIL CARBON/ANALYSIS/All_WA_horizons_spec_geoage.csv") |>
-    dplyr::select(sample_ID, site, depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2, x, y)
+wa_dat <- read.csv("SOIL CARBON/All_WA/data/dataframes/wa_spl_datperc_0_15_30_60_100_150_200.csv") |>
+    dplyr::select(sample_ID, site, lower_depth, SOC_stock_spline, lat, lon)
 str(wa_dat)
 
-wa_dat_pts <- vect(wa_dat, geom = c("x", "y"), crs = "EPSG:26910")
+wa_dat_pts <- vect(wa_dat, geom = c("lon", "lat"), crs = "EPSG:4326")
 plot(wa_dat_pts)
-```
-
-### Raster and Vector data 
-
-We import and project geospatial data derived from digital elevation models (DEMs) 
-
-In particular, `geomorphons` is derived using **Whitebox Tools** which implements the algorithm from 
-
-*Jasiewicz, J., and Stepinski, T. F. (2013). Geomorphons — a pattern recognition approach to classification and mapping of landforms. Geomorphology, 182, 147-156.*
-
-- The 10 types of geomorphons are given categorical letter codes
-
-```{r eval=FALSE}
-
-catconv <- data.frame(id = 1:10, geomorphons = letters[1:10])
-
-#Colville
-col_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_HLI.tif") |> project("EPSG:26910")
-col_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/col_geomorphons_11_23.tif")
-col_geomorph_cat <- categories(col_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
-
-
-#Mashel
-mas_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_HLI.tif") |> project("EPSG:26910")
-mas_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/mas_geomorphons_11_23.tif")|>
-    project("EPSG:26910")
-mas_geomorph_cat <- categories(mas_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
-
-
-#Hoh
-hoh_hli <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_HLI.tif") |> project("EPSG:26910")
-hoh_geomorph <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/hoh_geomorphons_11_23.tif")
-hoh_geomorph_cat <- categories(hoh_geomorph, layer = 1, value = catconv) |> project("EPSG:26910")
-```
-
-
-We merge layers to make extracting geospatial predictors easier
-
-The `merge_wip` refers to the **Wetland Intrinsic Potential** (WIP) tool and is derived from implementing the algorithm in
-
-*Halabisky, Meghan, Dan Miller, Anthony J. Stewart, Amy Yahnke, Daniel Lorigan, Tate Brasel, and Ludmila Monika Moskal. “The Wetland Intrinsic Potential Tool: Mapping Wetland Intrinsic Potential through Machine Learning of Multi-Scale Remote Sensing Proxies of Wetland Indicators.” Hydrology and Earth System Sciences 27, no. 20 (October 20, 2023): 3687–99. https://doi.org/10.5194/hess-27-3687-2023.*
-
-
-```{r}
-#Merge Layers
-geomorph_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")#terra::merge(col_geomorph_cat, mas_geomorph_cat, hoh_geomorph_cat, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_geomorph_merge.tif")
-hli_stack <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")#terra::merge(col_hli, mas_hli, hoh_hli, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_HLI_merge.tif")
-
-merge_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_WIP_MERGE.tif")
-```
-
-Here is a map of the Hoh River Watershed WIP, where `0.0 = 0% Wetland or Upland` and `1.0 = 100% Wetland`
-
-- The gradient captures hydrologic conditions across the landscape and derived mostly from topography metrics at different scales 
-
-```{r echo=FALSE, message=FALSE}
-library(rasterVis)
-
-mas_wip <- rast("Mashel/Mashel_WIP_2024/DataExport/Mashel_WIP_Final_2856.tif") #|> project("EPSG:2856")
-hoh_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_WIP_Mask0_10_2022.tif") |> project("EPSG:2855")
-col_wip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/colville_NWI_WIP_clip_INV.tif") |> project("EPSG:2855")
-
-colr <- colorRampPalette(RColorBrewer::brewer.pal(9, "YlGnBu"))
-levelplot(hoh_wip, margin = F, par.settings=list(
-            axis.line=list(col='transparent') # suppress axes and legend outline
-          ), scales=list(draw=FALSE), maxpixels = 9e5, 
-          col.regions=colr)
-```
-
-
-More geospatial predictors from across WA state. This includes precipitation and temperature from The PRISM Climate Group
-
-*PRISM Climate Group, Oregon State University, https://prism.oregonstate.edu* 
-
-
-
-Geology data on geologic age and lithology are downloaded from the WA Dept. of Natural Resources
-
-```{r eval=FALSE}
-#All WA layers
-wa_state <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_State_Boundary/WA_State_Boundary.shp") |> project("EPSG:4326")
-
-wa_precip <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_Precip.tif") |> terra::project("EPSG:26910")
-wa_temp <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/ALL_WA_Temp.tif") |> terra::project("EPSG:26910")
-
-wa_geology <- vect("WA_Geo/ger_portal_surface_geology_100k/surface_geology_100k.gdb", layer = "geologic_unit_poly_100k") |> 
-    terra::project("EPSG:26910") |> tidyterra::select(LITHOLOGY, GEOLOGIC_AGE)
-```
-
-Spectral data are considered to approximate vegetation productivity and health. They are derived from Landsat median reflectance data collected over June-September in the years 2014-2023 and downloaded from Google Earth Engine.
-
-```{r eval=FALSE}
-spec_list <- list.files("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_GEE_StudyAreas_Boxes/", pattern = ".tif", full.names = TRUE)
-
-hoh_poly <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/HOH_POLYGON_7_11_2022/HOH_POLYGON_711.gpkg") |> project("EPSG:2855")
-mas_poly <- vect("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/MAS_poly/mashel_poly.shp") |> project("EPSG:2856")
-col_poly <- vect("Colville/Colville_WIP_2024/DataExport/ColvilleHUC.shp") |> terra::aggregate() |> project("EPSG:2855")
-```
-
-
-```{r eval=FALSE}
-rast_list <- list()
-for(i in 1:length(spec_list)){
-    rast_list[[i]] <- rast(spec_list[[i]]) 
-}
-
-hoh_mas_spec2855 <- merge(rast_list[[2]], rast_list[[1]]) 
-hoh_box <- ext(-124.647030861616, -123.709196305401, 47.5021021439002, 47.9527148717352)
-hoh_spec <- crop(hoh_mas_spec2855, hoh_box) |> project("EPSG:2855") |> mask(mask = hoh_poly, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/HOH/Hoh_Spec_Sum2014_2023.tif", overwrite = TRUE)
-
-mas_box <- ext(-122.390044402154, -121.895362438437, 46.7048642408074, 46.9405693599827)
-mas_spec <- crop(hoh_mas_spec2855, mas_box) |> project("EPSG:2856") |> mask(mask = mas_poly, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/MAS/Mas_Spec_Sum2014_2023.tif", overwrite = TRUE)
-
-col_spec <- rast_list[[3]] |> project("EPSG:2855") |> crop(y = col_poly, mask = TRUE, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/COL/Col_Spec_Sum2014_2023.tif", overwrite = TRUE)
-
-
-```
-
-
-```{r eval=FALSE}
-wa_spec_merge <- terra::merge(wa_spec1, wa_spec2, wa_spec3, filename = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_GEE_spec_median_merge.tif", overwrite = T) |>
-    project("EPSG:26910")
-```
-
-
-```{r}
-wa_spec_merge <- rast("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_median_GEE_spec_median_merge.tif")
 ```
 
 ### Extraction
 
-The locations of the pedon observations are used to extract all geospatial metrics. 
+The locations of the pedon observations are used to extract all geospatial metrics.
 
 ```{r}
-wa <- readxl::read_xlsx("SOIL CARBON/ANALYSIS/All_PNW_horizons.xlsx")
+wa_dat_pts |> filter(site == "HOH") |> project("EPSG:2855") |> 
+  terra::extract(x = hoh_stack, bind = TRUE, method = "simple") |>
+  writeVector("SOIL CARBON/All_WA/data/points/hoh_pts_2855.gpkg", overwrite = TRUE)
+wa_dat_pts |> filter(site == "MAS") |> project("EPSG:2856") |> 
+  terra::extract(x = mas_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/mas_pts_2856.gpkg", overwrite = TRUE)
+wa_dat_pts |> filter(site == "COL") |> project("EPSG:2855") |> 
+  terra::extract(x = col_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/col_pts_2855.gpkg", overwrite = TRUE)
 
-mas <- wa[wa$site == "MAS",]
-hoh_col <- wa[wa$site == "HOH" | wa$site == "COL", ]
-mas_pts <- vect(mas, geom = c("x", "y"), crs = "EPSG:26910") |> project("EPSG:2856")
-hoh_col_pts <- vect(hoh_col, geom = c("x", "y"), crs = "EPSG:26910") |> project("EPSG:2855")
-hoh_pts <- hoh_col_pts[hoh_col_pts$site == "HOH",]
-col_pts <- hoh_col_pts[hoh_col_pts$site == "COL",]
-
+hoh_pts <- vect("SOIL CARBON/All_WA/data/points/hoh_pts_2855.gpkg")
+mas_pts <- vect("SOIL CARBON/All_WA/data/points/mas_pts_2856.gpkg")
+col_pts <- vect("SOIL CARBON/All_WA/data/points/col_pts_2855.gpkg")
 
 ```
 
+```{r}
+data.frame(mas_pts)
+```
 
-
-
+### Extraction Org Min
 
 ```{r}
+wa_dat_org_min_pts <- read.csv( "SOIL CARBON/All_WA/data/dataframes/All_WA_horizons_org_min.csv") |> vect(geom = c("lon", "lat"), crs = "EPSG:4326")
 
-wa_geo_ext <- read.csv("SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/WA_geo_extract.csv")
-
-wa_dat_pts_ext <- wa_dat_pts |> terra::extract(x = geomorph_stack, bind = TRUE, method = "simple") |>
-    terra::extract(x = hli_stack, bind = TRUE, method = "simple") |>
-    terra::extract(x = wa_precip, bind = TRUE, method = "simple") |> 
-    terra::extract(x = wa_temp, bind = TRUE, method = "simple") |>
-    terra::extract(x = merge_wip, bind = TRUE, method = "simple") |>
-    terra::extract(x = wa_spec_merge, bind = TRUE, method = "simple") |> 
-    tidyterra::rename(HLI = lyr.1,
-                      Precip = PRISM_ppt_30yr_normal_800mM4_annual_asc,
-                      Temp = PRISM_tmean_30yr_normal_800mM4_annual_asc,
-                      WIP = WET) |>
-    tidyterra::select(-uncertainty) |>
-    tidyterra::bind_spat_cols(wa_geo_ext[,c("LITHOLOGY", "GEOLOGIC_AGE")])
-(values(wa_dat_pts_ext))
-names(wa_dat_pts_ext)
-
-write.csv(wa_dat_pts_ext, file = "SOIL CARBON/ANALYSIS/R/WA_SOC_controls/All_WA_horizons_spec_geoagelith.csv")
-writeVector(wa_dat_pts_ext, file = "SOIL CARBON/SPATIAL LAYERS/SPATIAL_LAYERS_7_11_22/All_WA/All_WA_horizons_spec_geoagelith.gpkg", overwrite = T)
+wa_dat_org_min_pts |> filter(site == "HOH") |> project("EPSG:2855") |> 
+  terra::extract(x = hoh_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/hoh_pts_orgmin_2855.gpkg", overwrite = TRUE)
+wa_dat_org_min_pts |> filter(site == "MAS") |> project("EPSG:2856") |> 
+  terra::extract(x = mas_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/mas_pts_orgmin__2856.gpkg", overwrite = TRUE)
+wa_dat_org_min_pts |> filter(site == "COL") |> project("EPSG:2855") |> 
+  terra::extract(x = col_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/col_pts_orgmin__2855.gpkg", overwrite = TRUE)
 ```
 

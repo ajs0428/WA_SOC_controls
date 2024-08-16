@@ -32,7 +32,7 @@ library(dplyr)
 The dataset of SOC stock by horizons for 96 pedon locations in Washington state contains 481 separate observations.
 
 
-```{r eval=FALSE}
+```{r}
 library(terra)
 library(aqp)
 library(ithir)
@@ -41,21 +41,21 @@ library(dplyr)
 
 setwd("/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/")
 
-wa_dat <- read.csv("SOIL CARBON/ANALYSIS/R/WA_SOC_controls/All_WA_horizons_spec_geoagelith.csv")
+wa_dat <- read.csv("SOIL CARBON/All_WA/data/dataframes/All_WA_horizons.csv")
 str(wa_dat)
 ```
 
 Next we calculate top, center, and bottoms of the soil horizons
 
-```{r eval=FALSE}
+```{r}
 wa_dat_horC <- wa_dat |>
     dplyr::group_by(sample_ID) |> 
     mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
                            .default = lag(depth_cm)),
            bottom = depth_cm,
            center = abs(top - (top - bottom)/2)) |> 
-    dplyr::select(sample_ID, top, center, bottom, carbon_perc, carbon_stock_g_cm2) 
-str(wa_dat_horC)
+    dplyr::select(sample_ID, top, bottom, carbon_perc, carbon_stock_g_cm2) 
+(wa_dat_horC)
 ```
 
 Next, create a subset of the data with only the predictor variables
@@ -64,43 +64,106 @@ Next, create a subset of the data with only the predictor variables
 
 - There should be 96 rows (number of pedons collected in WA)
 
-```{r eval=FALSE}
+```{r}
 
-wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(X, depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2)) |>
+wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2)) |>
     group_by(sample_ID) |>
     filter(row_number() == 1) |> 
     dplyr::select(sample_ID, everything()) |>
     dplyr::arrange(site)
-str(wa_hor_dat_sub)
+(wa_hor_dat_sub)
 ```
 
 In order to generate mapped predictions of SOC stock, we use adjust the dataset from observations of horizons of varying depths to observations of standard depth increments. Specifically, we use the mass-preserving spline method of Bishop et al (1999) (doi: 10.1016/S0016-7061(99)00003-8) to generate SOC stock estimates for intervals of 0-30cm, 30-60cm, and 60-100cm
 ```{r eval=FALSE}
-wa_spl <- mpspline_tidy(obj = wa_dat_horC, var_name = "carbon_stock_g_cm2", d = c(0, 30, 60, 100)) 
-wa_spl_dat_0_30_60_100 <- wa_spl$est_dcm |>
+wa_spl <- mpspline_tidy(obj = wa_dat_horC, var_name = "carbon_stock_g_cm2", d = c(0, 15, 30, 60, 100, 150, 200)) 
+wa_spl_datperc_0_15_30_60_100_150_200 <- wa_spl$est_dcm |>
     left_join(y = wa_hor_dat_sub, by = join_by(sample_ID), relationship = "many-to-one") |>
     rename(SOC_stock_spline = SPLINED_VALUE,
            upper_depth = UD,
-           lower_depth = LD)
-str(wa_spl_dat_0_30_60_100)
-write.csv(wa_spl_dat_0_30_60_100, file = "SOIL CARBON/ANALYSIS/R/WA_SOC_controls/wa_spl_dat_0_30_60_100.csv")
+           lower_depth = LD) |>
+  filter(SOC_stock_spline >0)
+(wa_spl_datperc_0_15_30_60_100_150_200)
+wa_spl_datperc_0_15_30_60_100_150_200 |> filter(SOC_stock_spline < 0.003)
+
+write.csv(wa_spl_datperc_0_15_30_60_100_150_200, file = "SOIL CARBON/All_WA/data/dataframes/wa_spl_datperc_0_15_30_60_100_150_200.csv")
 
 ```
 
-```{r}
-summary(lm(wa_spl_dat_0_30_60_100$SOC_stock_spline ~ wa_spl_dat_0_30_60_100$WIP + wa_spl_dat_0_30_60_100$site))
 
-plot(wa_spl_dat_0_30_60_100$WIP, wa_spl_dat_0_30_60_100$SOC_stock_spline)
-abline(0, 1)
+
+### Organic Mineral split 
+
+```{r}
+wa_dat_org_min <- wa_dat |> 
+  mutate(org_min = case_when(carbon_perc > 10 ~ "ORG", 
+                               .default = "MIN")) |>
+  select(-field_texture, -field_texture_binned, -redox, -helper)
+
+readr::write_csv(wa_dat_org_min, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_horizons_org_min.csv")
 ```
 
+#### Organic Mineral 1m stocks
+
 ```{r}
-test <- wa_spl_dat_0_30_60_100 |> filter(site == "MAS")
-summary(lm(test$SOC_stock_spline ~ test$WIP))
+wa_dat_org_stocks <- wa_dat_org_min |> dplyr::group_by(sample_ID) |> 
+    mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
+                           .default = lag(depth_cm)),
+           bottom = depth_cm,
+           center = abs(top - (top - bottom)/2)) |> 
+  filter(org_min == "ORG") |> 
+  mutate(thick100 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom, bottom > 100 & top < 100 ~ bottom - (bottom -100)-lag(bottom), bottom > 100 & top > 100 ~ 0,
+                              bottom < 100 & bottom - lag(bottom) < 0 ~ bottom,
+                              bottom < 100 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                              bottom == 100 ~ bottom - lag(bottom),
+                              .default = NA),
+         SOC_hor_stock100 = ((carbon_perc/100)*BD_g_cm3*thick100*(1-(rock_perc/100))) ) |>  mutate(thickfull = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                               bottom > 999 & top <= 999 ~ bottom - (bottom -999)-lag(bottom),
+                               bottom > 999 & top >= 999 ~ 0,
+                               bottom < 999 & bottom - lag(bottom) < 0 ~ bottom,
+                               bottom < 999 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                               bottom == 999 ~ bottom - lag(bottom),
+                               .default = NA),
+                               SOC_hor_stockfull = ((carbon_perc/100)*BD_g_cm3*thickfull*(1-(rock_perc/100))) ) |>
+                            dplyr::summarise(SOC_stock_100 = sum(SOC_hor_stock100)*100,
+                                             SOC_stock_full = sum(SOC_hor_stockfull)*100,
+                             #stock_check = mean(SOC120),
+                             #WIP = mean(WIP),
+                             maxdepth = max(depth_cm),
+                             n = n(),
+                             lat = mean(lat),
+                             lon = mean(lon)
+                             # .by = sample_ID
+                             )
 
-plot(test$WIP, test$SOC_stock_spline)
-abline(0, 1)
-
-
+wa_dat_min_stocks <- wa_dat_org_min |> dplyr::group_by(sample_ID) |> 
+    mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
+                           .default = lag(depth_cm)),
+           bottom = depth_cm,
+           center = abs(top - (top - bottom)/2)) |> 
+  filter(org_min == "MIN") |> 
+  mutate(thick100 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom, bottom > 100 & top < 100 ~ bottom - (bottom -100)-lag(bottom), bottom > 100 & top > 100 ~ 0,
+                              bottom < 100 & bottom - lag(bottom) < 0 ~ bottom,
+                              bottom < 100 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                              bottom == 100 ~ bottom - lag(bottom),
+                              .default = NA),
+         SOC_hor_stock100 = ((carbon_perc/100)*BD_g_cm3*thick100*(1-(rock_perc/100))) ) |>  mutate(thickfull = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                               bottom > 999 & top <= 999 ~ bottom - (bottom -999)-lag(bottom),
+                               bottom > 999 & top >= 999 ~ 0,
+                               bottom < 999 & bottom - lag(bottom) < 0 ~ bottom,
+                               bottom < 999 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                               bottom == 999 ~ bottom - lag(bottom),
+                               .default = NA),
+                               SOC_hor_stockfull = ((carbon_perc/100)*BD_g_cm3*thickfull*(1-(rock_perc/100))) ) |>
+                            dplyr::summarise(SOC_stock_100 = sum(SOC_hor_stock100)*100,
+                                             SOC_stock_full = sum(SOC_hor_stockfull)*100,
+                             #stock_check = mean(SOC120),
+                             #WIP = mean(WIP),
+                             maxdepth = max(depth_cm),
+                             n = n(),
+                             lat = mean(lat),
+                             lon = mean(lon)
+                             # .by = sample_ID
+                             )
 ```
 

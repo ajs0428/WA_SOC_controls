@@ -1,5 +1,5 @@
 ---
-title: "Analysis of soil carbon controls across the Pacific Northwest"
+title: "Analysis of soil carbon controls across Washington State"
 author: "Anthony Stewart"
 output:
   html_document:
@@ -37,6 +37,7 @@ library(sf)
 library(mapview)
 library(car)
 library(ggplot2)
+library(forcats)
 library(sjPlot)
 library(sjstats)
 library(DHARMa)
@@ -72,123 +73,146 @@ r.sq <- function(y,y.fitted){
 
 
 ```{r echo=FALSE}
-wa_dat <- read.csv("SOIL CARBON/ANALYSIS/All_WA_horizons_spec_geoage.csv")
-str(wa_dat)
+hoh_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/hoh_pts_2855.gpkg"))
+mas_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/mas_pts_2856.gpkg"))
+col_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/col_pts_2855.gpkg"))
 
-wa_spl_dat_0_30_60_100 <- read.csv("SOIL CARBON/ANALYSIS/R/WA_SOC_controls/wa_spl_dat_0_30_60_100.csv")
-colnames(wa_spl_dat_0_30_60_100) <- gsub("_median","",colnames(wa_spl_dat_0_30_60_100))
-str(wa_spl_dat_0_30_60_100)
-
-# wa_spl_dat_30_100 <- read.csv("SOIL CARBON/ANALYSIS/R/WA_SOC_controls/wa_spl_dat_30_100.csv") 
-# colnames(wa_spl_dat_30_100) <- gsub("_median","",colnames(wa_spl_dat_30_100))
-# #str(wa_spl_dat_30_100)
+wa_dat <- rbind(hoh_dat, mas_dat, col_dat) |> 
+  mutate(
+  GEO = as.factor(GEO),
+  geomorphons = as.factor(geomorphons),
+  site = as.factor(site),
+  site = fct_reorder(site, SOC_stock_spline, .fun = "median")) |>
+  dplyr::rename_with(~gsub("_median", "", .x, fixed = TRUE))
+wa_dat
 ```
+
+```{r}
+unique(hoh_dat$GEO)
+unique(mas_dat$GEO)
+unique(col_dat$GEO)
+```
+
 
 With many potential predictors we can eliminate some by examining correlation plots
 
 ```{r echo=FALSE}
-wa_spl_dat_num <- wa_spl_dat_0_30_60_100 |> 
+wa_dat_num <- wa_dat |> 
     dplyr::select(SOC_stock_spline,
                #lower_depth,
-               Precip, 
-               Temp,
-               tree_canopy_cover,
-               NDYI, # Normalized difference yellow index
-               NDVI, # Normalized difference vegetation index
-               #MNDWI,
+               DTM,
+               HLI,
+               # NDYI_median, # Normalized difference yellow index
+               # NDVI_median, # Normalized difference vegetation index
+               #MNDWI, #Modified Normalized Difference Water Index
                EVI, # Enhanced vegetation index
-               #SCI,
-               DSI, #Drought Stress Index
-               #LSWI,
-               #ANDWI,
-               #SAVI, #Soil Adjusted Vegetation Index
                WIP) |> as.matrix()
 
-ggcorrplot(cor(wa_spl_dat_num), method = "square", type = "full", lab = T, lab_size = 3)
+ggcorrplot(cor(wa_dat_num), method = "square", type = "full", lab = T, lab_size = 3)
 
 ```
 
-There is weak correlation between `SOC_stock_spline` and the selected covariates. Additionally there is some collinearity between predictors. The spectral predictors such as EVI (Enhanced Vegetation Index) and SCI (Soil Condition Index) are well correlated with each other and also with NDVI (Normalized Difference Vegetation Index). We can remove these based on the correlation coefficient > 0.7.
+There is weak correlation between `SOC_stock_spline` and the selected covariates. Additionally there is some collinearity between predictors. The spectral predictors such as NDYI (Normalized Difference Yellow Index) and NDVI (Normalized Difference Vegetation Index). We can remove these based on the correlation coefficient > 0.7.
 
 Now we can begin examining the distribution of carbon stock values in the dataset to choose the appropriate transformation. We also scale and center the numeric predictor variables.
 
 ```{r echo=FALSE, fig.show='hold', out.width="35%"}
 
-columns_to_exclude_spl <- c("SOC_stock_spline", "lower_depth") 
+columns_to_exclude <- c("SOC_stock_spline", "lower_depth") 
 
-wa_spl_dat_scale <- wa_spl_dat_0_30_60_100 |> 
+wa_dat_scale <- wa_dat |> 
     dplyr::select(sample_ID, lower_depth, SOC_stock_spline, 
-                  site, geomorphons, GEOLOGIC_AGE, Temp, Precip,
-                  NDVI, NDYI, WIP) |> 
+                  site, DTM, geomorphons, GEO, WIP,
+                  EVI, MNDWI, HLI) |> 
     dplyr::mutate(across(
-        dplyr::where(is.numeric) & !all_of(columns_to_exclude_spl),
-                  ~dplyr::case_when(TRUE ~ scale(.))))
-str(wa_spl_dat_scale)
-hist(wa_spl_dat_scale$SOC_stock_spline)
-hist(log10(wa_spl_dat_scale$SOC_stock_spline))
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+                  ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_spline, .fun = "median")) 
+(wa_dat_scale)
+hist(wa_dat_scale$SOC_stock_spline)
+hist(log10(wa_dat_scale$SOC_stock_spline))
 
 ```
 
 ### Explicit parameter model building 
 
 
-Now build models using log transformed carbon stock data. We need to specify that `sample_ID` is a random effect because of the multiple samples at one location. `lower_depth` will be a random slope to adjust model based on how it is affected by depth. We could use a Generalized Linear Model or a Generalized Linear Mixed Model here too but they often fail to converge. We will model with the log-transformed soil carbon stocks in the linear mixed model 
+Now build models using log transformed carbon stock data. We need to specify that `sample_ID` is a random effect because of the multiple samples at one location. `lower_depth` will be a random slope to adjust model based on how it is affected by depth. 
+
+Also lower depth is included as a fixed effect to specify an overall effect of depth in addition to accounting for the random slope within `sample_ID` locations. See:
+
+- [https://stats.stackexchange.com/questions/614812/can-random-slopes-also-be-included-as-fixed-effects](https://stats.stackexchange.com/questions/614812/can-random-slopes-also-be-included-as-fixed-effects)
+
+We also use a different optimizer for the lmer model which uses `nloptwrap` by default and gives convergence warnings for multiple model iterations. We use the `bobyqa` optimizer and have assessed negligiable changes to log liklihood (< 0.1) and parameter estimates (< 0.00001). See:
+- [https://cran.r-project.org/web/packages/lme4/vignettes/lmerperf.html](https://cran.r-project.org/web/packages/lme4/vignettes/lmerperf.html)
+
+- [https://stackoverflow.com/questions/33670628/solution-to-the-warning-message-using-glmer](https://stackoverflow.com/questions/33670628/solution-to-the-warning-message-using-glmer) and `help(convergence)`
+
+We could use a Generalized Linear Model or a Generalized Linear Mixed Model here too but they often fail to converge. We will model with the log-transformed soil carbon stocks in the linear mixed model 
 
 ```{r}
-#Full model with hypothesized parameters
+#Full model with all parameters
 mod1 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP*Precip*Temp*NDVI*NDYI + (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-# No interactions
+                 WIP+EVI+DTM + (GEO) + geomorphons + site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+# No geomorphonssum
 mod2 <-lmer(log10(SOC_stock_spline) ~ 
-                WIP+Precip+Temp+NDVI+NDYI + (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No spectral
+                WIP+EVI+DTM+HLI + (GEO) + site +
+                 lower_depth + (lower_depth|sample_ID),  
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#No spectral, geomorphons
 mod3 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP*Precip*Temp + (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
+                 WIP+DTM+HLI + (GEO) + site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
 #No geology or geomorphons
 mod4 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP*Precip*Temp + NDVI+NDYI + (GEOLOGIC_AGE) +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-#No WIP w/ interaction
+                 WIP+DTM+HLI + site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#No WIP, geomorphons
 mod5 <- lmer(log10(SOC_stock_spline) ~ 
-                 Precip*Temp + NDVI+NDYI + (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-#No WIP w/o interaction
+                  DTM+HLI + (GEO) + site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#HLI interaction within site
 mod6 <- lmer(log10(SOC_stock_spline) ~ 
-                 Precip+Temp + NDVI+NDYI +  (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-#No climate
+                 WIP + DTM +(GEO) + HLI*site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#DTM interaction with site
 mod7 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP + NDVI+NDYI + (GEOLOGIC_AGE) + geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-#No climate No spectral
+                 WIP + HLI + DTM*site + (GEO) + 
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#Just geology and WIP
 mod8 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP + (GEOLOGIC_AGE)+ geomorphons +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
+                 WIP + (GEO) + 
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
 #Just WIP
 mod9 <- lmer(log10(SOC_stock_spline) ~ 
                  WIP + 
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
 #NULL
 mod10 <- lmer(log10(SOC_stock_spline) ~ 
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
 
 
 ```
-
-**Note** models 4, 5, 8, and 10, failed to converge
 
 Pairwise comparisons between the top, largest model and the rest show if models with fewer parameters are significantly different. Considering AIC will help determine the most parsimonious model with the best fit to the data. 
 
@@ -225,64 +249,40 @@ anova_table_mod1 |>
     #row_spec(, background = "lightblue") |> 
     kable_classic_2("hover", full_width = F) 
 ```
-From the ANOVAs it looks like `model 4` has the lower AIC when compared together. 
+From the ANOVAs it looks like `model 7` has the lower AIC when compared together. 
 
 
-To hone in on differences between variations in `model 4` we can remove some of the variables and compare AICs for a more parsimonious fit.
+To hone in on differences between variations in `model 7` we can remove some of the variables and compare AICs for a more parsimonious fit.
 
 ```{r}
-#No geology or geomorphons
-mod4 <- lmer(log10(SOC_stock_spline) ~ 
-                 WIP*Precip*Temp + NDVI+NDYI + (GEOLOGIC_AGE) +
-                 lower_depth + (lower_depth||sample_ID), 
-            data = wa_spl_dat_scale, REML = F)
-#No NDVI
-mod4.1 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp  + NDYI + (GEOLOGIC_AGE)+ 
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No NDVI, No NDYI
-mod4.2 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp + (GEOLOGIC_AGE)+ geomorphons + 
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No NDYI
-mod4.3 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp + NDVI + (GEOLOGIC_AGE)+
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No Geology
-mod4.4 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp + NDVI+NDYI + 
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No Geology NDVI, NDYI 
-mod4.5 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp +  
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No interactions Geology NDVI, NDYI
-mod4.6 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP+Precip+Temp +
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
-#No spectral or Geology
-mod4.7 <- lmer(log10(SOC_stock_spline) ~ 
-               WIP*Precip*Temp +
-                 lower_depth + (lower_depth||sample_ID),  
-            data = wa_spl_dat_scale, REML = F)
+#DTM interaction with site
+#No HLI
+mod7.1 <- lmer(log10(SOC_stock_spline) ~ 
+                 WIP  + (GEO) + DTM:site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#No GEO, HLI
+mod7.2 <- lmer(log10(SOC_stock_spline) ~ 
+                 WIP + DTM:site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
+#No WIP
+mod7.3 <- lmer(log10(SOC_stock_spline) ~ 
+                 DTM:site +
+                 lower_depth + (lower_depth|sample_ID), 
+            data = wa_dat_scale, REML = F,
+            control=lmerControl(optimizer="bobyqa"))
 ```
 
-**Note** models 4.4 failed to converge
+
 
 ```{r tidy=FALSE, echo=FALSE}
-anova_table_mod2 <- rbind(anova(mod4, mod4.1), #Not Significant
-anova(mod4, mod4.2), 
-anova(mod4, mod4.3), 
-anova(mod4, mod4.4),
-anova(mod4, mod4.5), 
-anova(mod4, mod4.6), 
-anova(mod4, mod4.7), make.row.names = T) #Not Significant
+anova_table_mod2 <- rbind(anova(mod7, mod7.1), #Not Significant
+anova(mod7, mod7.2), 
+anova(mod7, mod7.3), 
+make.row.names = T) #Not Significant
 
 anova_table_mod2 |>
     tibble::rownames_to_column(var = "models") |> 
@@ -290,13 +290,9 @@ anova_table_mod2 |>
                                 `Pr(>Chisq)` < 0.01 & `Pr(>Chisq)` > 0.001~ "***",
                                 `Pr(>Chisq)` < 0.001 ~ "***",
                                 .default = ""),
-           Models = case_when(models == "mod41" ~ "mod4",
-                              models == "mod42" ~ "mod4",
-                              models == "mod43" ~ "mod4",
-                              models == "mod44" ~ "mod4",
-                              models == "mod45" ~ "mod4",
-                              models == "mod46" ~ "mod4",
-                              models == "mod47" ~ "mod4",
+           Models = case_when(models == "mod71" ~ "mod7",
+                              models == "mod72" ~ "mod7",
+                              models == "mod73" ~ "mod7",
                               .default = models)) |>
     dplyr::select(-models) |> 
     dplyr::select(Models, everything()) |> 
@@ -304,46 +300,12 @@ anova_table_mod2 |>
     kable_classic_2("hover", full_width = F)
 
 ```
-`Model 2.4` and `2.6` are the lowest AIC and not significantly different from the fit in `Model 2`. Because `Model 2.2` failed to converge, we will move forward with `Model 2.1`. 
+`Model 7` is the lowest AIC
 
-Now we can look at the table of all models and compare AICs. We find that Model 2.1 has the lowest AIC followed by ``Model 2.2`` which failed to converge
-
-```{r 'model list and table', message=FALSE, echo=FALSE}
-mod_list <- list(mod4, mod4.1, mod4.2,
-                 mod4.3, mod4.4, mod4.5, mod4.6, mod4.7)
-mod_names <- c("mod4", "mod4.1", "mod4.2",
-                 "mod4.3", "mod4.4", "mod4.5", "mod4.6", "mod4.7")
-
-
-mod_AIC = matrix(nrow = length(mod_list), ncol =3)
-
-
-for (i in 1:length(mod_list)) {
-    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
-    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
-    mod_AIC[i,3] <- mod_names[i]
-}
-    
-delta_AIC <- as.data.frame(cbind(mod_AIC))
-delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
-names(delta_AIC) <- c("AIC", "formula", "name", "delta")
-
-```
-
-```{r message=FALSE, echo=FALSE, out.width="75%"}
-library(kableExtra)
-delta_AIC |>
-  kbl() |>
-  kable_classic_2("hover", full_width = F) |>
-    row_spec(c(2), background = "lightblue")
-```
-
- The model $R^2$ for `mod4.1` is `r round(r.sq(log10(wa_spl_dat_scale$SOC_stock_spline), fitted(mod4.1)), 3)`
+ The model $R^2$ for `mod7` is `r round(r.sq(log10(wa_dat_scale$SOC_stock_spline), fitted(mod7)), 3)`
 
 ```{r include=FALSE}
-cor(wa_spl_dat_scale$ANDWI, wa_spl_dat_scale$NDYI)
-round(r.sq(log10(wa_spl_dat_scale$SOC_stock_spline), fitted(mod4.1)), 3)
-round(r.sq(log10(wa_spl_dat_scale$SOC_stock_spline), fitted(mod4.2)), 3)
+round(r.sq(log10(wa_dat_scale$SOC_stock_spline), fitted(mod7)), 3)
 ```
 
 
@@ -351,7 +313,7 @@ Confidence intervals calculated with bootstrapping show that `WIP` and  `Precip`
 
 <div align="center">
 ```{r cache=TRUE, echo=FALSE, out.width="100%"}
-tab_model(mod4.1, bootstrap = T, seed = 10, dv.labels = c("Model 4.1"))
+tab_model(mod7, bootstrap = T, seed = 11, dv.labels = c("Model 7"))
 ```
 </div>
 
@@ -359,90 +321,141 @@ Looking at some partial dependence plots we can see some relationships between t
 
 ```{r fig.show='hold', fig.align='center', echo=FALSE, message=FALSE}
 library(ggpubr)
-mod4.1precip <- ggplot(wa_spl_dat_scale, aes(y = fitted(mod4.1), x = Precip)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI))+
-    ylab("Fitted Model 4.1")
-mod4.1wip <- ggplot(wa_spl_dat_scale, aes(y = fitted(mod4.1), x = WIP)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI))+
-    ylab("Fitted Model 4.1")
 
-ggarrange(mod4.1precip, mod4.1wip, ncol = 2, nrow=1, common.legend = T)
+partial_plot <- function(data, model, x_var, color_var, shape_var){
+  if(is.factor(data[x_var][[1]]) == TRUE) {
+  x_var <- sym(x_var)
+  shape_var <- sym(shape_var)
+  color_var <- sym(color_var) 
+  fitted <- predict(model, newdata = data)
+  
+  ggplot(data, aes(y = 10**fitted, x = as.factor(!!x_var))) +
+    geom_violin(show.legend = FALSE, scale = "width", linewidth = 0.9)+
+    geom_jitter(aes(shape = !!shape_var, , color = !!color_var), width = 0.2, size = 2)+
+    xlab("Study Area\n") + 
+    ylab(expression('Fitted Model SOC Stock (g cm'^-2*')')) +
+    theme(legend.position = 'right', 
+          legend.key.size = unit(0.6, "cm"),
+          legend.spacing.x = unit(1.2, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 16))
+  } else {
+    if(x_var == "WIP"){
+      label <- "Wetland Intrinsic Potential \n Scaled"
+    } else if(x_var == "DTM") {
+      label <- "Elevation Scaled\n"
+    }
+  x_var <- sym(x_var)
+  shape_var <- sym(shape_var)
+  color_var <- sym(color_var) 
+  fitted <- predict(model, newdata = data)
+  
+  ggplot(data, aes(y = 10**fitted, x = !!x_var)) +
+    geom_point(aes(shape = !!shape_var, color = !!color_var), size = 2)+
+    xlab(label) +
+    ylab(expression('Fitted Model SOC Stock (g cm'^-2*')')) +
+    geom_smooth(aes(y = 10**fitted, x = !!x_var), 
+                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
+                linewidth = 0.9, linetype = 5, alpha = 0.3, se = T) + 
+    theme(legend.position = 'top', 
+          legend.key.size = unit(0.8, "cm"),
+          legend.spacing.x = unit(1.2, "cm"),
+          panel.background = element_blank(),
+          panel.grid.major = element_line(colour = "grey80"),
+          axis.ticks = element_blank(),
+          text = element_text(size = 16))
+  }
+}
+
+mod7site <- partial_plot(data = wa_dat_scale, model = mod7, x_var = "site", shape_var = "GEO", color_var = "HLI")
+
+mod7wip <- partial_plot(data = wa_dat_scale, model = mod7, x_var = "WIP", shape_var = "GEO", color_var = "HLI")
+
+mod7dtm <- partial_plot(data = wa_dat_scale, model = mod7, x_var = "DTM", shape_var = "GEO", color_var = "HLI")
+
+ggarrange(mod7site, mod7wip+rremove("ylab"), mod7dtm+rremove("ylab"), ncol = 3, nrow=1, common.legend = T,
+          vjust = 10)
 ```
 
+#### Splitting up wetland and upland soils 
+
+Use the WIP threshold of 50% or 0.5
+
 ```{r echo=FALSE, message=FALSE}
-wa_spl_dat_scale_wet <- wa_spl_dat_0_30_60_100 |> 
-    mutate(wip_wet = wa_spl_dat_0_30_60_100$WIP) |> 
-    filter(wip_wet >= 0.5) |> 
-    select(-wip_wet) |> 
+wa_dat_scale_wet <- wa_dat |> 
+    filter((WIP >= 0.5 )) |> 
     dplyr::mutate(across(
-        dplyr::where(is.numeric) & !all_of(columns_to_exclude_spl),
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
                   ~dplyr::case_when(TRUE ~ scale(.))))
     
-wa_spl_dat_scale_upl <- wa_spl_dat_0_30_60_100 |> 
-    mutate(wip_wet = wa_spl_dat_0_30_60_100$WIP) |> 
-    filter(wip_wet < 0.5) |> 
-    select(-wip_wet) |> 
+wa_dat_scale_upl <- wa_dat |> 
+    filter((WIP < 0.5 )) |> 
     dplyr::mutate(across(
-        dplyr::where(is.numeric) & !all_of(columns_to_exclude_spl),
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
                   ~dplyr::case_when(TRUE ~ scale(.))))
+    
 ```
 
 <div align="center">
 ```{r echo=FALSE, message=FALSE}
-mod4.1_wet <- update(mod4.1, data = wa_spl_dat_scale_wet)
+mod7_wet <- update(mod7, data = wa_dat_scale_wet)
+
+mod7wet_pred <- predict(mod7, newdata = wa_dat_scale_wet)
 #summary(mod2.1_wet)
-mod4.1_upl <- update(mod4.1, data = wa_spl_dat_scale_upl)
+mod7_upl <- update(mod7, data = wa_dat_scale_upl)
+
+mod7upl_pred <- predict(mod7, newdata = wa_dat_scale_upl)
 #summary(mod2.1_upl)
-tab_model(mod4.1_wet, mod4.1_upl, dv.labels = c("Wetlands (WIP > 0.50", "Uplands (WIP < 0.50)"))
+tab_model(mod7_wet, mod7_upl, dv.labels = c("Wetlands (WIP > 0.50", "Uplands (WIP < 0.50)"))
 ```
 </div>
 
 ```{r echo=FALSE, message=FALSE}
 library(ppcor)
 
-pcor.test(wa_spl_dat_scale_wet$WIP, wa_spl_dat_scale_wet$SOC_stock_spline, wa_spl_dat_scale_wet$lower_depth)
+rbind(pcor.test(wa_dat_scale_wet$WIP, wa_dat_scale_wet$SOC_stock_spline, wa_dat_scale_wet$lower_depth),
+pcor.test(wa_dat_scale_upl$WIP, wa_dat_scale_upl$SOC_stock_spline, wa_dat_scale_upl$lower_depth))
 
-pcor.test(wa_spl_dat_scale_upl$WIP, wa_spl_dat_scale_upl$SOC_stock_spline, wa_spl_dat_scale_upl$lower_depth)
+rbind(pcor.test(wa_dat_scale_wet$DTM, wa_dat_scale_wet$SOC_stock_spline, wa_dat_scale_wet$lower_depth),
+pcor.test(wa_dat_scale_upl$DTM, wa_dat_scale_upl$SOC_stock_spline, wa_dat_scale_upl$lower_depth))
 
-pcor.test(wa_spl_dat_scale_wet$Precip, wa_spl_dat_scale_wet$SOC_stock_spline, wa_spl_dat_scale_wet$lower_depth)
+rbind(pcor.test(wa_dat_scale_wet$HLI, wa_dat_scale_wet$SOC_stock_spline, wa_dat_scale_wet$lower_depth),
+pcor.test(wa_dat_scale_upl$HLI, wa_dat_scale_upl$SOC_stock_spline, wa_dat_scale_upl$lower_depth))
 
-pcor.test(wa_spl_dat_scale_upl$Precip, wa_spl_dat_scale_upl$SOC_stock_spline, wa_spl_dat_scale_upl$lower_depth)
 ```
 
 
 ```{r echo=FALSE, message=FALSE}
 library(ggpubr)
-precip_wet <- ggplot(wa_spl_dat_scale_wet, 
-                     aes(y = (SOC_stock_spline), x = Precip)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI)) +
-    geom_smooth(aes(y = SOC_stock_spline, x = (Precip)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) + 
-    ylab(expression('Fitted SOC Stock (g cm'^-2*')'))
-wip_wet <- ggplot(wa_spl_dat_scale_wet, 
-                     aes(y = SOC_stock_spline, x = WIP)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI)) +
-    geom_smooth(aes(y = SOC_stock_spline, x = (WIP)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) + 
-    ylab("")
-precip_upl <- ggplot(wa_spl_dat_scale_upl, 
-                     aes(y = SOC_stock_spline, x = Precip)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI)) +
-    geom_smooth(aes(y = SOC_stock_spline, x = (Precip)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) + 
-    ylab(expression('Fitted SOC Stock (g cm'^-2*')'))
-wip_upl <- ggplot(wa_spl_dat_scale_upl, 
-                     aes(y = SOC_stock_spline, x = WIP)) +
-    geom_jitter(aes(shape = GEOLOGIC_AGE, color = NDYI))+
-    geom_smooth(aes(y = SOC_stock_spline, x = (WIP)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) + 
-    ylab("")
 
-wetupl_graphs <- ggarrange(precip_wet, wip_wet, precip_upl, wip_upl, ncol = 2, nrow=2, common.legend = T)
+DTM_wet <- partial_plot(data = wa_dat_scale_wet, 
+             model = mod7, 
+             x_var = "DTM", 
+             color_var = "site", 
+             shape_var = "GEO")
 
+wip_wet <- partial_plot(data = wa_dat_scale_wet, 
+             model = mod7, 
+             x_var = "WIP", 
+             color_var = "site", 
+             shape_var = "GEO")
+
+DTM_upl <- partial_plot(data = wa_dat_scale_upl, 
+             model = mod7, 
+             x_var = "DTM", 
+             color_var = "site", 
+             shape_var = "GEO")
+
+wip_upl <- partial_plot(data = wa_dat_scale_upl, 
+             model = mod7, 
+             x_var = "WIP", 
+             color_var = "site", 
+             shape_var = "GEO")
+
+wetupl_graphs <- ggarrange(DTM_wet+rremove("xlab"), wip_wet+rremove("xlab")+rremove("ylab"), 
+                           DTM_upl, wip_upl+rremove("ylab"), ncol = 2, nrow=2, common.legend = T)
 annotate_figure(
     annotate_figure(wetupl_graphs, 
                     left = grid::textGrob("Upland", 
@@ -457,145 +470,18 @@ ggplot2::ggsave(plot = wetupl_graphs, filename = paste0("/Users/Anthony/OneDrive
 ```
 
 
+We can visualize some of these interactions with interaction plots against SOC stock. 
 
----
-
-### Dredging for model selection
-
-With the explicit hypothesized approach, we can only evaluate so many models. However, there may be interactions between variables that might be more powerful controls and could give insight into relationships between controls.
-
-The `dredge` function can be used to look through multiple combinations of models from a globally defined model. The number of parameters are limited so we run two models: one with the `NDYI` parameter and another with the `MNDWI` parameter included with `Temp`, `Precip`, and `WIP` fully interacting. `GEOLOGIC_AGE` is also included as an additional, non-interaction parameter and random effects are constant.
-
-```{r, cache=TRUE, echo=TRUE, results='hide', message=FALSE, warning=FALSE, include=FALSE}
-gmod1 <- lmer(log10(SOC_stock_spline) ~  WIP*Temp*Precip*NDYI+GEOLOGIC_AGE+ lower_depth + (lower_depth||sample_ID), 
-              data = wa_spl_dat_scale, REML = F, na.action = 'na.fail')
-dredge1 <- dredge(gmod1, beta = "sd" )
-
-```
-
-```{r, cache=TRUE, out.height="50%", warning=FALSE, echo=FALSE, out.width="75%", include=FALSE}
-head(dredge1) |>
-  kbl() |>
-  kable_classic_2("hover", full_width = F) |>
-    scroll_box(width = "100%")
-dmod1 <- get.models(dredge1, 1)[[1]]
-```
-
-
-```{r cache=TRUE, echo=FALSE, out.width="100%", include=FALSE}
-tab_model(dmod1, bootstrap = T, seed = 10, dv.labels = c("Dredge Model"))
-```
-
-```{r 'dredge model list and table', message=FALSE, echo=FALSE, include=FALSE}
-mod_list <- list( get.models(dredge1, 1)[[1]],  get.models(dredge1, 2)[[1]],  get.models(dredge1, 3)[[1]])
-mod_names <- c("dmod1", "dmod2", "dmod3" )
-
-
-mod_AIC = matrix(nrow = length(mod_list), ncol =3)
-
-
-for (i in 1:length(mod_list)) {
-    mod_AIC[i,1] <- round(AIC(mod_list[[i]]), 2)
-    mod_AIC[i,2] <- paste0(formula(mod_list[[i]]))[3]
-    mod_AIC[i,3] <- mod_names[i]
-}
-    
-delta_AIC <- as.data.frame(cbind(mod_AIC))
-delta_AIC$delta <- as.numeric(delta_AIC$V1) -  min(as.numeric(delta_AIC$V1))
-names(delta_AIC) <- c("AIC", "formula", "name", "delta")
-
-```
-
-```{r message=FALSE, echo=FALSE, out.width="75%", include=FALSE}
-library(kableExtra)
-delta_AIC |>
-  kbl() |>
-  kable_classic_2("hover", full_width = F) |>
-    row_spec(c(1), background = "lightblue")
-```
-
-By using `dredge` we find that there are a few candidate models that fit the data well.
-
-The difference between the model AICs is lower than a common threshold of 2 but there is a difference between the top model and others. This model contains multiple interactions including `NDYI:Precip`, `NDYI:Temp`, `NDYI:WIP`	`Precip:Temp`, `Precip:WIP`, `Temp:WIP`,` NDYI:Precip:Temp`
-
-We can visualize some of these interactions with interaction plots against SOC stock. It looks like there is strong interaction and separation with the `NDYI` parameter and `WIP`
-
-```{r fig.show='hold', message=FALSE, echo=FALSE, include=FALSE}
+```{r fig.show='hold', message=FALSE, echo=FALSE}
 library(interactions)
-
-precwip <- interactions::interact_plot(dmod1, pred = Precip, modx = WIP, plot.points = T, plot.shape = T,
-                            x.label = "Precip", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "WIP Range",
-                            colors = "blue",
-                            interval = TRUE, )
-tempwip <- interactions::interact_plot(dmod1, pred = Temp, modx = WIP, plot.points = T, plot.shape = T,
-                            x.label = "Temp", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "WIP Range",
-                            colors = "seagreen",
-                            interval = TRUE, )
-ndyiwip <- interactions::interact_plot(dmod1, pred = NDYI, modx = WIP, plot.points = T, plot.shape = T,
-                            x.label = "NDYI", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "WIP Range",
-                            colors = "green",
+DTMsite <- interactions::interact_plot(mod7, pred = DTM, modx = site, plot.points = T, plot.shape = T,
+                            x.label = "DTM", 
+                            y.label = "Fitted Model SOC Stock",
+                            legend.main = "Site",
                             interval = TRUE, )
 
-ggarrange(precwip, tempwip,ndyiwip, ncol = 3, nrow=1, common.legend = T)
 
-precndyi <- interactions::interact_plot(dmod1, pred = Precip, modx = NDYI, plot.points = T, plot.shape = T,
-                            x.label = "Precip", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "NDYI Range",
-                            colors = "blue",
-                            interval = TRUE )
-tempndyi <- interactions::interact_plot(dmod1, pred = Temp, modx = NDYI, plot.points = T, plot.shape = T,
-                            x.label = "Temp", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "NDYI Range",
-                            colors = "seagreen",
-                            interval = TRUE )
-wipndyi <- interactions::interact_plot(dmod1, pred = WIP, modx = NDYI, plot.points = T, plot.shape = T,
-                            x.label = "WIP", 
-                            y.label = "Fitted Dredge Model SOC Stock",
-                            legend.main = "NDYI Range",
-                            colors = "green",
-                            interval = TRUE )
-ggarrange(precndyi, tempndyi,wipndyi, ncol = 3, nrow=1, common.legend = T)
-
-
-```
-
-We can look at the bootstrapped confidence intervals to examine the significance of the predictors between the two models. Interestingly the `WIP` parameter alone is not significant. And there is high effect sizes for `NDYI`, `NDYI:Temp`, and `(NDYI × Precip) × Temp`
-
-<dev align="center">
-```{r cache=TRUE, echo=FALSE, include=FALSE}
-tab_model(dmod1, bootstrap = T, seed = 10, dv.labels = c("Dredge Model"))
-```
-</dev>
-
-
-```{r include=FALSE, include=FALSE}
-r.sq(log10(wa_spl_dat_scale$SOC_stock_spline), fitted(dmod1))
-```
-
-The R$^{2}$ of the Dredge Model is R$^{2}$ = `r round(r.sq(log10(wa_spl_dat_scale$SOC_stock_spline), fitted(dmod1)), 3)` 
-
-```{r echo=FALSE, message=FALSE, include=FALSE}
-dmod_wet <- lmer(log10(SOC_stock_spline) ~  WIP*Precip + NDYI+
-                     GEOLOGIC_AGE+ lower_depth + (lower_depth||sample_ID), 
-              data = wa_spl_dat_scale_wet, REML = F, na.action = 'na.fail')
-dredge_wet <- dredge(dmod_wet, beta = "sd" )
-dmodwet1 <- get.models(dredge_wet, 1)[[1]]
-
-dmod_upl <- lmer(log10(SOC_stock_spline) ~  WIP*Precip+NDYI+
-                     GEOLOGIC_AGE+ lower_depth + (lower_depth||sample_ID), 
-              data = wa_spl_dat_scale_upl, REML = F, na.action = 'na.fail')
-dredge_upl <- dredge(dmod_upl, beta = "sd" )
-dmodupl1 <- get.models(dredge_upl, 1)[[1]]
-
-tab_model(dmodwet1, dmodupl1, dv.labels = c("Wetlands (WIP > 0.50", "Uplands (WIP < 0.50)"))
+DTMsite
 ```
 
 
@@ -611,16 +497,16 @@ library(randomForest)
 set.seed(11)
 
 # Validation Set 
-train.index <- as.vector(sample(c(1:nrow(wa_spl_dat_scale)), 0.7*nrow(wa_spl_dat_scale), replace=F))
-train <- wa_spl_dat_scale[train.index, c("SOC_stock_spline", "WIP", "GEOLOGIC_AGE", "Temp", "Precip", "lower_depth", "NDVI", "NDYI", "geomorphons" )]
-train$GEOLOGIC_AGE <- as.character(train$GEOLOGIC_AGE)
+train.index <- as.vector(sample(c(1:nrow(wa_dat_scale)), 0.7*nrow(wa_dat_scale), replace=F))
+train <- wa_dat_scale[train.index, -1]
+train$GEO <- as.character(train$GEO)
 train$SOC_stock_spline <- log10(train$SOC_stock_spline)
-test <- wa_spl_dat_scale[-train.index, c("SOC_stock_spline", "WIP", "GEOLOGIC_AGE", "Temp", "Precip", "lower_depth", "NDVI",  "NDYI", "geomorphons")]
-test$GEOLOGIC_AGE <- as.character(test$GEOLOGIC_AGE)
+
+test <- wa_dat_scale[-train.index, -1]
+test$GEO<- as.character(test$GEO)
 test$SOC_stock_spline <- log10(test$SOC_stock_spline)
-full <- wa_spl_dat_scale[, c("SOC_stock_spline", "WIP", "GEOLOGIC_AGE", "Temp", "Precip", "lower_depth", "NDVI", "NDYI",  "geomorphons")]
-full$GEOLOGIC_AGE <- as.character(full$GEOLOGIC_AGE)
-full$SOC_stock_spline <- log10(full$SOC_stock_spline)
+
+full <- wa_dat_scale[, -1]
 
 ```
 
@@ -629,33 +515,38 @@ We then use the `tuneRF` to choose the appropriate `mtry` number
 
 ```{r echo=FALSE, message=FALSE, results='hide'}
 set.seed(11)
-tuneRF(x = full[, 2:ncol(full)], y = (full$SOC_stock_spline), mtryStart = 3, ntreeTry = 500, stepFactor = 1.5, improve = 0.0001)
+tuneRF(x = train[, 4:ncol(train)], y = (train$SOC_stock_spline), mtryStart = 4, ntreeTry = 500, stepFactor = 1.5, improve = 0.0001)
 ```
 
 
 ```{r fig.show='hold', cache=TRUE, results='hide'}
+set.seed(11)
 rf_model <- randomForest((SOC_stock_spline) ~ .,
-                         ntree = 1000, mtry = 3,
-                         importance = TRUE, data = full)
+                         sampsize = nrow(train),
+                         ntree = 1000, mtry = 4,
+                         importance = TRUE, data = train)
+rf_model
 plot(rf_model)
 
-rf.full <- predict(rf_model, newdata = full)
+rf.train <- predict(rf_model, newdata = train)
+rf.test <- predict(rf_model, newdata = test)
+
 vip::vip(rf_model)
 ```
 
 
-61.63% of the out of bag (OOB) variation is explained. Looks like`Precip`, `lower_depth`, `WIP`, and `NDYI` are the big drivers. 
+61.63% of the out of bag (OOB) variation is explained. Looks like `lower_depth`, `WIP`, and `site` are the big drivers. 
 
 
 ```{r echo=FALSE}
 
-errdf <- data.frame("error variable" = c("MAE", "MAE^2", "RMSE", "RMSE non-log", "Stdev of non-log SOC stock",  "R^2 on full dataset"), 
-                    "value" = c(caret::MAE(pred = rf.full, obs = (full$SOC_stock_spline)),
-                                caret::MAE(pred = rf.full, obs = (full$SOC_stock_spline))**2,
-                                caret::RMSE(pred = rf.full, obs = (full$SOC_stock_spline)),
-                               exp(caret::RMSE(pred = rf.full, obs = (full$SOC_stock_spline))),
-                                sd(wa_spl_dat_scale$SOC_stock_spline),
-                                caret::R2(pred = rf.full, obs = (full$SOC_stock_spline))))
+errdf <- data.frame("error variable" = c("MAE", "MAE^2", "RMSE Test", "RMSE non-log", "Stdev of non-log SOC stock",  "R^2 on test dataset"), 
+                    "value" = c(caret::MAE(pred = rf.train, obs = (train$SOC_stock_spline)),
+                                caret::MAE(pred = rf.train, obs = (train$SOC_stock_spline))**2,
+                                caret::RMSE(pred = rf.test, obs = (test$SOC_stock_spline)),
+                               exp(caret::RMSE(pred = rf.test, obs = (test$SOC_stock_spline))),
+                                sd(wa_dat_scale$SOC_stock_spline),
+                                caret::R2(pred = rf.test, obs = (test$SOC_stock_spline))))
 errdf |> kbl() |>
   kable_classic_2("hover", full_width = F)
 ```
@@ -669,25 +560,19 @@ library(gridExtra)
 library(grid)
 
 
-wip_pdp<- data.frame(randomForest::partialPlot(rf_model, full, WIP, plot = FALSE)) |> 
+wip_pdp<- data.frame(randomForest::partialPlot(rf_model, train, WIP, plot = FALSE)) |> 
     ggplot() +
         geom_line(aes(x = x, y = y)) +
     xlab("WIP") +
     ylim(-1, -0.25) +
     ylab(expression('Model Prediction Effect'))
-precip_pdp<- data.frame(randomForest::partialPlot(rf_model, full, Precip, plot = FALSE)) |> 
+DTM_pdp<- data.frame(randomForest::partialPlot(rf_model, train, DTM, plot = FALSE)) |> 
     ggplot() +
         geom_line(aes(x = x, y = y))+
-    xlab("Precipitation") +
+    xlab("DTM Elevation") +
     ylim(-1,  -0.25) +
     ylab(expression('Model Prediction Effect'))
-ndyi_pdp <- data.frame(randomForest::partialPlot(rf_model, full, NDYI, plot = FALSE)) |> 
-    ggplot() +
-        geom_line(aes(x = x, y = y))+
-    xlab("NDYI") +
-    ylim(-1, -0.25) +
-    ylab(expression('Model Prediction Effect'))
-lower_pdp <- data.frame(randomForest::partialPlot(rf_model, full, lower_depth, plot = FALSE)) |> 
+lower_pdp <- data.frame(randomForest::partialPlot(rf_model, train, lower_depth, plot = FALSE)) |> 
     ggplot() +
         geom_line(aes(x = x, y = y))+
     xlab("Depth") +
@@ -696,205 +581,63 @@ lower_pdp <- data.frame(randomForest::partialPlot(rf_model, full, lower_depth, p
 
 
 
-grid.arrange(precip_pdp, wip_pdp, lower_pdp, ndyi_pdp, ncol = 2, nrow=2)
+grid.arrange(wip_pdp, lower_pdp, DTM_pdp, ncol = 3, nrow=1)
 ```
 
-
-```{r fig.show='hold', echo=FALSE}
-
-rf.predtrain <- predict(rf_model, newdata = train)
-rf.predtest <- predict(rf_model, newdata = test)
-rf.predfull <- predict(rf_model, newdata = full)
-```
-
-```{r "RF R2", echo=FALSE, message=FALSE, include=FALSE, eval=FALSE}
-
-# paste0(round(mean((rf.predtrain - (train$SOC_stock_spline))^2), 3), " mean square error rf model from training")
-paste0(round(r.sq((train$SOC_stock_spline), rf.predtrain), 3), " R^2 rf model from training")
-paste0(round(r.sq((test$SOC_stock_spline), rf.predtest), 3),  " R^2 rf model from testing ")
-
-```
-
-
-
-```{r fig.show='hold', cache=TRUE, results='hide'}
-fullwet <- wa_spl_dat_scale_wet[, c("SOC_stock_spline", "WIP", "GEOLOGIC_AGE", "Temp", "Precip", "lower_depth", "NDVI",  "NDYI",  "geomorphons")]
-fullwet$GEOLOGIC_AGE <- as.character(fullwet$GEOLOGIC_AGE)
-fullwet$SOC_stock_spline <- log10(fullwet$SOC_stock_spline)
-
-fullupl <- wa_spl_dat_scale_upl[, c("SOC_stock_spline", "WIP", "GEOLOGIC_AGE", "Temp", "Precip", "lower_depth", "NDVI", "NDYI",  "geomorphons")]
-fullupl$GEOLOGIC_AGE <- as.character(fullupl$GEOLOGIC_AGE)
-fullupl$SOC_stock_spline <- log10(fullupl$SOC_stock_spline)
-
-rf_modelwet <- randomForest((SOC_stock_spline) ~ .,
-                         ntree = 1000, mtry = 3,
-                         importance = TRUE, data = fullwet)
-plot(rf_modelwet)
-
-rf.fullwet <- predict(rf_modelwet, newdata = fullwet)
-wetvip <- vip::vip(rf_modelwet)
-```
-```{r}
-rf_modelupl <- randomForest((SOC_stock_spline) ~ .,
-                         ntree = 1000, mtry = 4,
-                         importance = TRUE, data = fullupl)
-plot(rf_modelupl)
-
-rf.fullupl <- predict(rf_modelupl, newdata = fullupl)
-uplvip <- vip::vip(rf_modelupl)
-```
-
-
-```{r}
-vipwetupl <- ggarrange(wetvip, uplvip, ncol = 2, labels = c("Wetland", "Upland") )
-
-ggplot2::ggsave(plot = vipwetupl, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Presentations/Conferences/AGU2023/ExploringControls/Figures and Tables/vipwetupl.jpeg"),
-                width = 9, height = 7.5, units = "in", dpi = 500)
-```
-
-
-
-We can now visualize our candidate model 4.1 in a predicted vs. actual plot
+We can now visualize our candidate model 7 in a predicted vs. actual plot
 
 ```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
 library(RColorBrewer)
-mod2.1graph <- ggplot(wa_spl_dat_scale, 
-                      aes(y = 10**(fitted(mod4.1)), x = (SOC_stock_spline))) +
+(mod7graph <- ggplot(wa_dat, 
+                      aes(y = 10**(fitted(mod7)), x = (SOC_stock_spline))) +
     geom_jitter(color='black', 
-                aes(fill = (wa_spl_dat_0_30_60_100$WIP*100), 
-                    shape = as.factor(GEOLOGIC_AGE)),
-               size = 3, stroke = 0.9, alpha = 0.7) +
+                aes(fill = (wa_dat$WIP*100), 
+                    shape = as.factor(site)),
+               size = 4, stroke = 0.9, alpha = 0.8) +
     scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"),
-                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
+                         name = "Wetland \nProbability %", n.breaks = 5, limits = c(0, 100)) +
      scale_shape_manual(name = "Geologic Age", 
-                        values = c(20, 21, 22, 23, 24, 25),
-                        labels= c("Pleistocene", "Quaternary", 
-                                  "Miocene-Eocene", "Oligocene-Eocene",
-                                  "Eocene", "pre-Tertiary" )) +
-    geom_smooth(aes(y = 10**(fitted(mod4.1)), x = (SOC_stock_spline)), 
+                        values = c(21, 22, 23, 24)) +
+    geom_smooth(aes(y = 10**(fitted(mod7)), x = (SOC_stock_spline)), 
                 method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) +
+                linewidth = 0.9, linetype = 5, alpha = 0.3, se = T) +
     xlab(expression('Sampled SOC Stock (g cm'^-2*')')) + 
     ylab(expression('Predicted SOC Stock (g cm'^-2*')')) + 
-    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
+    geom_abline(intercept = 0, slope = 1, linewidth = 0.9, linetype = "dashed") +
     annotate("text", 
              label = paste("R^{2} == ", 
-                           round(r.sq((wa_spl_dat_scale$SOC_stock_spline),
-                                      10**fitted(mod4.1)), 3)), 
-             x = 0.5, y = 2.2, size = 4, parse = T) + 
-    #xlim(-4, 5) +
-    #ylim(-4, 5)  +
-    guides(guide_legend(byrow = TRUE)) +
+                           round(r.sq((wa_dat$SOC_stock_spline),
+                                      10**fitted(mod7)), 3)), 
+             x = 0.5, y = 3.5, size = 4, parse = T) + 
+    annotate("text", label = "Model Fit", 
+             x = 1.5, y = 3.5, size = 4) +
+    annotate("segment", color = "#fa3e3e",
+             x = 1.3, y = 3.3, linewidth = 0.9, linetype = 5, 
+             xend = 1.75) + 
+    annotate("text", label = "1:1", 
+             x = 2.5, y = 3.5, size = 4) +
+    annotate("segment", color = "black",
+             x = 2.3, y = 3.3, linewidth = 0.9, linetype = "dashed",
+             xend = 2.75) +
+    xlim(0, 4) +
+    ylim(0, 4)  +
     theme(legend.position = 'right', 
-          legend.key.size = unit(0.5, "cm"),
+          legend.key.size = unit(0.6, "cm"),
+          legend.spacing.x = unit(1.2, "cm"),
           panel.background = element_blank(),
           panel.grid.major = element_line(colour = "grey80"),
           axis.ticks = element_blank(),
-          text = element_text(size = 18))
+          text = element_text(size = 16)) +
+    guides(guide_legend(byrow = TRUE))
+)
 
-ggplot2::ggsave(plot = mod2.1graph, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Presentations/Conferences/AGU2023/ExploringControls/Figures and Tables/model4_1.png"),
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, include=FALSE}
+ggplot2::ggsave(plot = mod7graph, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/SOIL CARBON/All_WA/writing/Figures/model7_nonlog_SOCprediction.png"),
                 width = 9, height = 7.5, units = "in", dpi = 500)
-```
-
-
-We now can examine the plot with the Dredge Model
-```{r tidy=FALSE, echo=FALSE, message=FALSE, include=FALSE, include=FALSE}
-
-dmodgraph <- ggplot(wa_spl_dat_scale, 
-                    aes(y = 10**(fitted(dmod1)), x = (SOC_stock_spline))) +
-    geom_jitter(color='black', 
-               aes(fill = (wa_spl_dat_0_30_60_100$WIP*100), 
-                   shape = as.factor(GEOLOGIC_AGE)),
-               size = 3, stroke = 0.9, alpha = 0.7) +
-    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
-                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
-     scale_shape_manual(name = "Geologic Age", 
-                        values = c(20, 21, 22, 23, 24, 25),
-                        labels= c("Pleistocene", "Quaternary", 
-                                  "Miocene-Eocene", "Oligocene-Eocene",
-                                  "Eocene", "pre-Tertiary" )) +
-    geom_smooth(aes(y = 10**(fitted(dmod1)), x = (SOC_stock_spline)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) +
-    xlab(expression('Sampled SOC Stock (g cm'^-2*')')) + 
-    ylab(expression('Predicted SOC Stock (g cm'^-2*')')) + 
-    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
-    annotate("text", label = paste("R^{2} == ", 
-                                   round(r.sq((wa_spl_dat_scale$SOC_stock_spline), 10**fitted(dmod1)), 3)), 
-             y = 2.2, x = 0.5, size = 4, parse = T) + 
-    guides(guide_legend(byrow = TRUE)) +
-    theme(legend.position = 'right', 
-          legend.key.size = unit(0.5, "cm"),
-          panel.background = element_blank(),
-          panel.grid.major = element_line(colour = "grey80"),
-          axis.ticks = element_blank(),
-          text = element_text(size = 18))
-
-ggplot2::ggsave(plot = dmodgraph, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Presentations/Conferences/AGU2023/ExploringControls/Figures and Tables/dmod.png"),
-                width = 9, height = 7.5, units = "in", dpi = 500)
-```
-
-
-
-Here, we show the fit between sampled and predicted SOC stocks for the full Random Forest Model
-
-```{r fig.show='hold', tidy=FALSE, echo=FALSE, message=FALSE, include=TRUE}
-
-library(RColorBrewer)
-rf_graph <- ggplot(wa_spl_dat_scale, 
-                   aes(y = 10**(rf.full), x = (SOC_stock_spline))) +
-    geom_jitter(color='black', 
-               aes(fill = (wa_spl_dat_0_30_60_100$WIP*100), 
-                   shape = as.factor(GEOLOGIC_AGE)),
-               size = 3, stroke = 0.9, alpha = 0.7) +
-    scale_fill_gradientn(colours = brewer.pal(9, "YlGnBu"), 
-                         name = "WIP %", n.breaks = 5, limits = c(0, 100)) +
-    scale_shape_manual(name = "Geologic Age", 
-                        values = c(20, 21, 22, 23, 24, 25),
-                        labels= c("Pleistocene", "Quaternary", 
-                                  "Miocene-Eocene", "Oligocene-Eocene",
-                                  "Eocene", "pre-Tertiary" )) +
-    geom_smooth(aes(y = 10**(rf.full), x = (SOC_stock_spline)), 
-                method = "lm", color = "#fa3e3e", fill = "#fa3e3e", 
-                size = 1.2, linetype = 5, alpha = 0.3, se = T) +
-    xlab(expression('Sampled SOC Stock (g cm'^-2*')')) + 
-    ylab(expression('Predicted SOC Stock (g cm'^-2*')')) + 
-    geom_abline(intercept = 0, slope = 1, linewidth = 1, linetype = "dashed") +
-    annotate("text", label = paste("R^{2} == ",
-                                   round(r.sq((wa_spl_dat_scale$SOC_stock_spline), 10**(rf.predfull)), 3)),
-             y = 2.2, x = 0.5, size = 4, parse = T) +
-    #xlim(-4, 5) +
-    #ylim(-4, 5)  +
-    guides(guide_legend(byrow = TRUE)) +
-    theme(legend.position = 'right', 
-          legend.key.size = unit(0.5, "cm"),
-          panel.background = element_blank(),
-          panel.grid.major = element_line(colour = "grey80"),
-          axis.ticks = element_blank(),
-          text = element_text(size = 18))
-
-ggplot2::ggsave(plot = rf_graph, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Presentations/Conferences/AGU2023/ExploringControls/Figures and Tables/rf_model.png"),
-                width = 9, height = 7.5, units = "in", dpi = 500)
-```
-
-```{r fig.show='hold', tidy=FALSE, echo=FALSE, message=FALSE, include=FALSE, out.height=12}
-
-allpredgraph <- ggpubr::ggarrange(mod2.1graph, rf_graph, common.legend = T, ncol = 1, nrow= 2)
-
-ggplot2::ggsave(plot = allpredgraph, filename = paste0("/Users/Anthony/OneDrive - UW/University of Washington/Presentations/Conferences/AGU2023/ExploringControls/Figures and Tables/allpred_graph.png"),
-                width = 9, height = 18, units = "in", dpi = 500)
-```
-
-
-```{r}
-library(ppcor)
-
-pcor.test(wa_spl_dat_scale$WIP, wa_spl_dat_scale$SOC_stock_spline, wa_spl_dat_scale$lower_depth)
-
-pcor.test(wa_spl_dat_scale$Precip, wa_spl_dat_scale$SOC_stock_spline, wa_spl_dat_scale$lower_depth)
-
-pcor.test(wa_spl_dat_scale$Temp, wa_spl_dat_scale$SOC_stock_spline, wa_spl_dat_scale$lower_depth)
-
 ```
 
 

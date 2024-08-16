@@ -1,0 +1,399 @@
+---
+title: "All WA SOC Relationship with Particle Size and pH"
+format: html
+---
+
+
+```{r setup, include=FALSE}
+library(formatR)
+knitr::opts_chunk$set(echo = FALSE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 100,
+                      message = FALSE, warning = FALSE)
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = T, collapse = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(rgl)
+library(openxlsx)
+library(terra)
+library(lme4)
+library(MASS)
+library(mgcv)
+library(lmerTest)
+library(quantreg)
+library(MuMIn)
+library(RLRsim)
+library(terra)
+library(sf)
+library(mapview)
+library(car)
+library(tidyverse)
+library(tidyterra)
+library(forcats)
+library(sjPlot)
+library(sjstats)
+library(DHARMa)
+library(ggeffects)
+library(merTools)
+library(glmnet)
+library(stats)
+library(ggcorrplot)
+library(RColorBrewer)
+library(cowplot)
+library(webshot)
+library(kableExtra)
+library(pdp)
+library(vip)
+library(formatR)
+library(ggpubr)
+library(grid)
+library(gridExtra)
+library(aqp)
+library(ithir)
+library(mpspline2)
+library(dplyr)
+
+knitr::knit_hooks$set(webgl = hook_webgl)
+rgl::setupKnitr(autoprint = TRUE)
+
+
+# Quick R^2 function
+r.sq <- function(y,y.fitted){
+    res <- y-y.fitted
+    1-sum(res^2)/sum((y-mean(y))^2)
+}
+```
+
+
+Data
+
+```{r}
+psa_dat <- openxlsx::read.xlsx("/Users/Anthony/OneDrive - UW/University of Washington/Lab Work/WA_Texture_pH/All_PNW_horizons_pH_PSA.xlsx", sheet = "PSA Draft Analysis", cols = c(1:8)) |> 
+    rename("SOCperc" = "SOC%",
+           "SiltClay" = "SILT+CLAY",
+           "sample_ID" = "Site",
+           "StudyArea" = "Study.Area",
+           "depth_cm" = "depth") |>
+    dplyr::group_by(sample_ID) |> 
+    arrange(depth_cm, .by_group = TRUE ) |> 
+    mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
+                           .default = lag(depth_cm)),
+           bottom = depth_cm,
+           center = abs(top - (top - bottom)/2)) |> 
+    dplyr::select(sample_ID, StudyArea, top, bottom, center, SOCperc, Sand, Silt, Clay, SiltClay) |> 
+  mutate(helper = paste0(sample_ID, "|", bottom))
+psa_dat
+
+# psa_dat_spl <- mpspline_tidy(obj = psa_dat, var_name = "SiltClay", d = c(0, 15, 30, 60, 100, 200)) 
+# wa_spl_datperc_0_15_30_60_100_200 <- psa_dat_spl$est_dcm |>
+#     left_join(y = wa_hor_dat_sub, by = join_by(sample_ID), relationship = "many-to-one") |>
+#     rename(SOC_perc_spline = SPLINED_VALUE,
+#            upper_depth = UD,
+#            lower_depth = LD)
+```
+
+
+
+```{r}
+wa_hor <- read.csv("SOIL CARBON/All_WA/data/dataframes/All_WA_horizons.csv")
+
+wa_hor_psa <- wa_hor |> left_join(y = psa_dat, by = join_by(helper), relationship = "many-to-one") |> select(-field_texture, -field_texture_binned, -redox) |> 
+  na.exclude() |> select(sample_ID.x, site, lat, lon, depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2, Sand, Silt, Clay, SiltClay)
+```
+
+
+```{r}
+wa_hor_psa_pts <- vect(wa_hor_psa, geom = c("lon", "lat"), crs = "EPSG:4326")
+plot(wa_hor_psa_pts)
+
+hoh_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack_Class.tif")
+mas_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mas_PredictorStack_Class.tif")
+col_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Col_PredictorStack_Class.tif")
+
+wa_hor_psa_pts |> filter(site == "HOH") |> project("EPSG:2855") |> 
+  terra::extract(x = hoh_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/hoh_psa_pts_2855.gpkg", overwrite = TRUE)
+wa_hor_psa_pts |> filter(site == "MAS") |> project("EPSG:2856") |> 
+  terra::extract(x = mas_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/mas_psa_pts_2856.gpkg", overwrite = TRUE)
+wa_hor_psa_pts |> filter(site == "COL") |> project("EPSG:2855") |> 
+  terra::extract(x = col_stack, bind = TRUE) |>
+  writeVector("SOIL CARBON/All_WA/data/points/col_psa_pts_2855.gpkg", overwrite = TRUE)
+```
+
+
+```{r}
+hoh_psa_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/hoh_psa_pts_2855.gpkg"))
+mas_psa_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/mas_psa_pts_2856.gpkg"))
+col_psa_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/col_psa_pts_2855.gpkg"))
+
+columns_to_exclude <- c("carbon_stock_g_cm2", "carbon_perc") 
+
+wa_psa_dat <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |> 
+  rename(sample_ID = sample_ID.x,
+         lower_depth = depth_cm) |>
+  mutate(
+  GEO = as.factor(GEO),
+  geomorphons = as.factor(geomorphons),
+  site = as.factor(site),
+  site = fct_reorder(site, carbon_stock_g_cm2, .fun = "median")) |>
+  dplyr::rename_with(~gsub("_median", "", .x, fixed = TRUE)) |> 
+  dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+                  ~dplyr::case_when(TRUE ~ scale(.))))
+wa_psa_dat
+```
+
+
+```{r}
+ggplot(wa_psa_dat, aes(x = Clay, y = carbon_stock_g_cm2)) +
+  geom_point(aes(color = MAP)) +
+  scale_color_viridis_b()
+```
+
+
+```{r}
+mod7 <- get(load("SOIL CARBON/All_WA/analysis/models/All_WA_Model7_Spline.RData"))
+
+mod7_c <- lmer(log(carbon_stock_g_cm2) ~CHM + WIP + MAP + Clay + GEO + lower_depth +
+    (1 | sample_ID), data = wa_psa_dat,
+    REML = FALSE)
+mod7_sc <- lmer(log(carbon_stock_g_cm2) ~ CHM + WIP + MAP + SiltClay + GEO + lower_depth +
+    (1 | sample_ID), data = wa_psa_dat,
+    REML = FALSE)
+# mod7_sci <- lmer(log(carbon_stock_g_cm2) ~ CHM + WIP + HLI + MAP*SiltClay + lower_depth +
+#     (lower_depth | sample_ID), data = wa_psa_dat,
+#     REML = FALSE)
+
+anova(mod7_c, mod7_sc)
+#anova(mod7_sc, mod7_sci)
+
+summary(mod7_c)
+anova(mod7_c)
+
+summary(mod7_sc)
+anova(mod7_sc)
+
+```
+
+```{r}
+gmod1 <- lmer(log(carbon_stock_g_cm2) ~ 
+                 HLI + WIP + ( MAP + SiltClay )*lower_depth +
+                  (1|sample_ID), 
+            data = wa_psa_dat, REML = F, na.action = 'na.fail')
+
+dmod <- dredge(gmod1, rank = "AIC", extra = "R^2", m.lim = c(5,55))
+
+head(dmod) 
+dmod1 <- get.models(dmod, 1)[[1]]
+
+summary(dmod1)
+anova(dmod1)
+```
+
+
+```{r}
+plot(mod7_sc)
+plot(mod7_sc, resid(.) ~ fitted(.)|sample_ID, abline = 0)
+
+qqnorm(resid(mod7_sc), col = as.factor(wa_psa_dat$sample_ID))
+qqline(resid(mod7_sc))
+
+lev <- hat(model.matrix(mod7_sc))
+plot(resid(mod7_sc) ~ lev, xlab = "leverage")
+
+cd <- cooks.distance(mod7)
+plot(lev)
+points(cd, col = "blue")
+
+hist(as.vector(unlist(ranef(mod7_sc)$sample_ID)))
+
+
+```
+
+```{r}
+mod7_sc_boot <- confint.merMod(mod7_sc, method = "boot", nsim = 1000, oldNames = FALSE, level = 0.95, set.seed(11))
+
+mod7_sc_boot |> data.frame() |> tibble::rownames_to_column() |> 
+  rename(Predictor = rowname,
+        "2.5%" = X2.5..,
+        "97.5%" = X97.5..)
+```
+
+```{r}
+library(effectsize)
+library(r2glmm)
+
+round(r.sq(log(wa_psa_dat$carbon_stock_g_cm2), fitted(mod7_sc)), 3)
+
+anova_sc <- anova(mod7_sc) |> data.frame() |> tibble::rownames_to_column() |> 
+  mutate(EffectSize_Eta = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[1]],
+         EffectSize_Eta2.5 = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[3]],
+         EffectSize_Eta97.5 = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[4]])
+
+r2partial_sc <- r2glmm::r2beta(mod7_sc, data = wa_psa_dat, method = "nsj") 
+r2partial_sc
+```
+
+Split up wetlands and uplands
+
+```{r}
+meanWIP <- attributes(wa_psa_dat$WIP)$`scaled:center`
+sdWIP <- attributes(wa_psa_dat$WIP)$`scaled:scale`
+
+wa_psa_dat_wet <- wa_psa_dat |> 
+    filter(WIP >= (0.5-meanWIP)/sdWIP)
+wa_psa_dat_upl <- wa_psa_dat |> 
+    filter(WIP < (0.5-meanWIP)/sdWIP)
+wa_psa_dat_mes <- wa_psa_dat |> 
+    filter(WIP >= (0.25-meanWIP)/sdWIP & WIP <= (0.75-meanWIP)/sdWIP)
+
+```
+
+
+```{r}
+cors_wetuplmes <- function(data, cor_vars){
+  df <- data.frame(var = NA, cor = NA, p = NA)
+  for(i in 1:length(cor_vars)){
+    cortest <- cor.test(data$carbon_stock_g_cm2, data[,cor_vars[[i]]], 
+                        alternative = "two.sided", method = "pearson")
+    df[i, "var"] <- cor_vars[[i]]
+    df[i, "p"] <- cortest[[3]]
+    df[i, "cor"] <- cortest[[4]]
+  }
+  df$p <- round(df$p, digits = 4)
+  return(df)
+}
+
+
+wet_cors <- cors_wetuplmes(wa_psa_dat_wet, c("MAP", "WIP", "CHM", "SiltClay", "lower_depth"))
+mes_cors <- cors_wetuplmes(wa_psa_dat_mes, c("MAP", "WIP", "CHM", "SiltClay", "lower_depth"))
+upl_cors <- cors_wetuplmes(wa_psa_dat_upl, c("MAP", "WIP", "CHM", "SiltClay", "lower_depth"))
+
+wet_cors$land <- "Wetland"
+mes_cors$land <- "Mesic"
+upl_cors$land <- "Upland"
+
+all_cors <- rbind(wet_cors, mes_cors, upl_cors)
+all_cors
+```
+
+```{r}
+library(ppcor)
+vars1 <- list("WIP", "MAP", "CHM", "SiltClay", "lower_depth")
+vars2 <- list("MAP", "CHM", "SiltClay",  "lower_depth", "WIP")
+vars3 <- list("CHM", "SiltClay", "lower_depth", "WIP", "MAP")
+vars4 <- list("SiltClay", "lower_depth", "WIP", "MAP", "CHM")
+vars5 <- list("lower_depth", "WIP", "MAP", "CHM", "SiltClay")
+varsdf <- list(vars1, vars2, vars3, vars4, vars5)
+
+partial_func <- function(vars){
+  var_list <- list()
+  c_est_list <- list()
+  c_pval_list <- list()
+  con_var_list <- list()
+  p_est_list <- list()
+  p_pval_list <- list()
+  #site_list <- list()
+  
+  for(i in 1:length(vars)){
+    if(i + 1 <= length(vars)) {
+      ct <- cor.test(wa_psa_dat[,vars[[1]]], 
+                     wa_psa_dat[,"carbon_stock_g_cm2"])
+      pt <- pcor.test(wa_psa_dat[,vars[[1]]], 
+                      wa_psa_dat[,"carbon_stock_g_cm2"], 
+                      wa_psa_dat[,vars[[i+1]]])
+      
+      var_list[[i]] <- paste0(vars[[1]], "_NULL")
+      c_est_list[[i]] <- ct$estimate[[1]]
+      c_pval_list[[i]] <- ct$p.value[[1]]
+      con_var_list[[i]] <- vars[[i+1]]
+      p_est_list[[i]] <- pt$estimate[[1]]
+      p_pval_list[[i]] <- pt$p.value[[1]]
+      #site_list[i] <- 
+    } else {
+      break
+    }
+  }
+  #return(unlist(est_list))
+  cdf <- data.frame(var = unlist(var_list), 
+                   est = unlist(c_est_list), 
+                   pval = unlist(c_pval_list))
+  pdf <- data.frame(var = unlist(con_var_list),
+                   est = unlist(p_est_list), 
+                   pval = unlist(p_pval_list)) 
+  df <- rbind(cdf[1,], pdf)
+  return(df)
+}
+
+plist <- list()
+for(i in 1:length(varsdf)){
+  plist[[i]] <- data.frame(partial_func(unlist(varsdf[[i]])))
+}
+
+partial_df <- data.frame(pred_vars = unlist(vars1),
+                         WIP = c(NA, #WIP
+                                 plist[[2]][plist[[2]]$var == "WIP", "est"], #MAP
+                                 plist[[3]][plist[[3]]$var == "WIP", "est"], #CHM
+                                 plist[[4]][plist[[4]]$var == "WIP", "est"]), #lower_depth
+                         MAP = c(plist[[1]][plist[[1]]$var == "MAP", "est"],
+                                 NA,
+                                 plist[[3]][plist[[3]]$var == "MAP", "est"],
+                                 plist[[4]][plist[[4]]$var == "MAP", "est"]),
+                         CHM = c(plist[[1]][plist[[1]]$var == "CHM", "est"],
+                                 plist[[2]][plist[[2]]$var == "CHM", "est"],
+                                 NA,
+                                 plist[[4]][plist[[4]]$var == "CHM", "est"]), 
+                         CHM = c(plist[[1]][plist[[1]]$var == "CHM", "est"],
+                                 plist[[2]][plist[[2]]$var == "CHM", "est"],
+                                 NA,
+                                 plist[[4]][plist[[4]]$var == "lower_depth", "est"]), 
+                         Depth = c(plist[[1]][plist[[1]]$var == "lower_depth", "est"],
+                                 plist[[2]][plist[[2]]$var == "lower_depth", "est"],
+                                 plist[[3]][plist[[3]]$var == "lower_depth", "est"],
+                                 NA), 
+                         Null = c(plist[[1]][plist[[1]]$var == "WIP_NULL", "est"], 
+                                  plist[[2]][plist[[2]]$var == "MAP_NULL", "est"],
+                                  plist[[3]][plist[[3]]$var == "CHM_NULL", "est"],
+                                  plist[[4]][plist[[4]]$var == "lower_depth_NULL", "est"]))
+
+partial_df
+```
+```{r}
+wa_psa_dat_num <- wa_psa_dat |> dplyr::select(carbon_stock_g_cm2, WIP, MAP, lower_depth, SiltClay)
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$MAP)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$MAP, wa_psa_dat$SiltClay)
+pcor(wa_psa_dat_num, "pearson")
+```
+
+
+```{r}
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$WIP)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$WIP, wa_psa_dat$SiltClay)
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$SiltClay)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$SiltClay, wa_psa_dat$WIP)
+
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$MAP)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$MAP, wa_psa_dat$SiltClay)
+
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$CHM)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$CHM, wa_psa_dat$SiltClay)
+
+cor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$lower_depth)
+pcor.test(wa_psa_dat$carbon_stock_g_cm2, wa_psa_dat$lower_depth, wa_psa_dat$SiltClay)
+```
+
+
+
+```{r}
+#psa_datj <- left_join(psa_dat, wa_dat, by = sample_ID)
+```
+
+```{r}
+library(lqmm)
+lqmm_sc <- lqmm(log(carbon_stock_g_cm2) ~  CHM + WIP + HLI + MAP + SiltClay + (GEO) + lower_depth, random = ~lower_depth,	group = sample_ID,
+	data = wa_psa_dat, tau = c(0.5,0.75, 0.9, 0.95), nK = 11)
+
+lqmm_sc_summ <- summary(lqmm_sc)
+lqmm_sc_boot <- boot(lqmm_sc)
+```
+
+
+
