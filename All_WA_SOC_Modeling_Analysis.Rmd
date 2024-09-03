@@ -50,6 +50,7 @@ library(RColorBrewer)
 library(cowplot)
 library(patchwork)
 library(webshot)
+library(webshot2)
 library(kableExtra)
 library(pdp)
 library(vip)
@@ -80,7 +81,10 @@ mas_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/mas_pts_2856.gpkg"))
 col_dat <- data.frame(vect("SOIL CARBON/All_WA/data/points/col_pts_2855.gpkg"))
 
 wa_dat <- rbind(hoh_dat, mas_dat, col_dat) |> 
+  filter(lower_depth <=200) |> 
+  rename(EVT = names) |> 
   mutate(
+  sample_ID = as.factor(sample_ID), 
   GEO = as.factor(GEO),
   EVT = as.factor(EVT),
   geomorphons = as.factor(geomorphons),
@@ -104,7 +108,7 @@ With many potential predictors we can eliminate some by examining correlation pl
 ```{r echo=FALSE}
 wa_dat_num <- wa_dat |> 
     dplyr::select(SOC_stock_spline,
-               #lower_depth,
+               lower_depth,
                CHM,
                MAT,
                MAP,
@@ -113,13 +117,23 @@ wa_dat_num <- wa_dat |>
                HLI,
                NDYI, # Normalized difference yellow index
                NDVI, # Normalized difference vegetation index
-               #MNDWI, #Modified Normalized Difference Water Index
+               MNDWI, #Modified Normalized Difference Water Index
                EVI, # Enhanced vegetation index
                WIP) |> as.matrix()
 
 corplot <- ggcorrplot(cor(wa_dat_num), method = "square", type = "full", lab = T, lab_size = 3)
 
 corplot
+
+wa_dat_num_topo <- wa_dat |> dplyr::select(SOC_stock_spline, 
+                                    dev_1000, dev_300, dev_50,
+                                    grad_1000, grad_300, grad_50,
+                                    WIP, DTM) |> as.matrix()
+
+
+corplot_topo <- ggcorrplot(cor(wa_dat_num_topo), method = "square", type = "full", lab = T, lab_size = 3)
+
+corplot_topo
 ```
 
 There is weak correlation between `SOC_stock_spline` and the selected covariates. Additionally there is some collinearity between predictors. The spectral predictors such as NDYI (Normalized Difference Yellow Index) and NDVI (Normalized Difference Vegetation Index). We can remove these based on the correlation coefficient > 0.7.
@@ -133,17 +147,42 @@ columns_to_exclude <- c("SOC_stock_spline")
 wa_dat_scale <- wa_dat |> 
     dplyr::select(sample_ID, lower_depth, SOC_stock_spline, 
                   site, CHM, DTM, geomorphons, GEO, WIP, EVT,
-                  EVI, NDVI, NDYI, VPD,
+                  EVI, NDVI, NDYI, VPD, dev_1000, grad_1000, dev_50, grad_300, grad_50,
                   MNDWI, HLI, lower_depth, MAT, MAP) |> 
     dplyr::mutate(across(
         dplyr::where(is.numeric) & !all_of(columns_to_exclude),
                   ~dplyr::case_when(TRUE ~ scale(.))),
         site = fct_reorder(site, SOC_stock_spline, .fun = "median")) 
-#write.csv(wa_dat_scale, "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_Scaled.csv")
+write.csv(wa_dat_scale, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_Scaled.csv")
 hist(wa_dat_scale$SOC_stock_spline)
 hist(log10(wa_dat_scale$SOC_stock_spline))
 
+wa_dat_scale_wet <- wa_dat |> 
+    filter(WIP >= 0.50) |> 
+    dplyr::select(sample_ID, lower_depth, SOC_stock_spline, 
+                  site, CHM, DTM, geomorphons, GEO, WIP, EVT,
+                  EVI, NDVI, NDYI, VPD, dev_1000, grad_1000, dev_50, grad_300, grad_50,
+                  MNDWI, HLI, lower_depth, MAT, MAP) |> 
+    dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+                  ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_spline, .fun = "median")) 
+write.csv(wa_dat_scale_wet, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_Scaled_Wet.csv")
+
+wa_dat_scale_upl <- wa_dat |> 
+    filter(WIP < 0.50) |> 
+    dplyr::select(sample_ID, lower_depth, SOC_stock_spline, 
+                  site, CHM, DTM, geomorphons, GEO, WIP, EVT,
+                  EVI, NDVI, NDYI, VPD, dev_1000, grad_1000, dev_50, grad_300, grad_50,
+                  MNDWI, HLI, lower_depth, MAT, MAP) |> 
+    dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+                  ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_spline, .fun = "median")) 
+write.csv(wa_dat_scale_upl, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_Scaled_Upl.csv")
+
 ```
+
 
 
 ### Model building 
@@ -163,6 +202,7 @@ We also use a different optimizer for the lmer model which uses `nloptwrap` by d
 We could use a Generalized Linear Model or a Generalized Linear Mixed Model here too but they often fail to converge. We will model with the log-transformed soil carbon stocks in the linear mixed model 
 
 ```{r}
+#| eval: false
 library(segmented)
 library(nlme)
 
@@ -387,7 +427,7 @@ anova_table_mod1 |>
                               .default = models)) |> 
     dplyr::select(-models) |> 
     dplyr::select(Models, everything()) |> 
-    dplyr::arrange((AIC)) |> 
+    #dplyr::arrange((AIC)) |> 
     kbl() |>
     #row_spec(, background = "lightblue") |> 
     kable_classic_2("hover", full_width = F) 
@@ -419,17 +459,21 @@ r2_table_modTs <- rbind(MuMIn::r.squaredGLMM(modT1),
                             MuMIn::r.squaredGLMM(modT8),
                             MuMIn::r.squaredGLMM(modT9),
                             MuMIn::r.squaredGLMM(modT10)) 
+
+r2_table_mods
 ```
+
 
 Next test if there is an interaction 
 
 ```{r}
 gmod1 <- lmer(log10(SOC_stock_spline) ~ 
-                 CHM + HLI + GEO +( MAP + WIP )*lower_depth +
+                 CHM + HLI + GEO +( MAP + WIP )*lower_depth +  
+                dev_1000 + dev_50  + grad_1000  + grad_50 + 
                  (lower_depth|sample_ID), 
             data = wa_dat_scale, REML = F, na.action = 'na.fail')
 
-mod7d <- dredge(gmod1, rank = "AIC", extra = "R^2", m.lim = c(3,8), subset = (CHM && GEO ))
+mod7d <- dredge(gmod1, rank = "AIC", extra = "R^2", m.lim = c(3,8), fixed = c("CHM", "WIP" ,"GEO", "MAP", "HLI"))
 
 head(mod7d, 10) 
 mod7d1 <- get.models(mod7d, 1)[[1]] # fewest terms and lowest AIC
@@ -442,8 +486,37 @@ r2glmm::r2beta(mod7d1, method = "nsj")
 anova(mod7, mod7d1)
 ```
 
+```{r}
+gmodw <- lmer(log10(SOC_stock_spline) ~ 
+                CHM + HLI + GEO +( MAP + WIP )*lower_depth +
+                dev_1000 + dev_50  + grad_1000  + grad_50 +  
+                 (1|sample_ID), 
+            data = wa_dat_scale_wet, REML = F, na.action = 'na.fail')
+
+modw <- dredge(gmodw, rank = "AIC", extra = "R^2", m.lim = c(3,8), fixed = c("CHM", "WIP" ,"GEO", "MAP", "HLI"))
+
+head(modw, 10) 
+modw <- get.models(modw, 1)[[1]] # fewest terms and lowest AIC
+
+gmodu <- lmer(log10(SOC_stock_spline) ~ 
+                 CHM + HLI + GEO +( MAP + WIP )*lower_depth +
+                dev_1000 + dev_50  + grad_1000 +  grad_50 +  
+                 (1|sample_ID), 
+            data = wa_dat_scale_upl, REML = F, na.action = 'na.fail')
+
+modu <- dredge(gmodu, rank = "AIC", extra = "R^2", m.lim = c(3,6), fixed = c("CHM", "WIP" ,"GEO", "MAP", "HLI"))
+
+head(modu, 10) 
+modu <- get.models(modu, 1)[[1]] # fewest terms and lowest AIC
+
+```
+
+
 ```{r fig.show='hold', out.width="80%"}
 Reduce(paste, deparse(formula(mod7)))
+Reduce(paste, deparse(formula(mod7d1)))
+Reduce(paste, deparse(formula(modw)))
+Reduce(paste, deparse(formula(modu)))
 
 plot(mod7d1)
 plot(mod7d1, resid(.) ~ fitted(.)|sample_ID, abline = 0)
@@ -501,40 +574,39 @@ wa_st <- rbind(hoh_st_prj, mas_st_prj, col_st_prj) |>
         dplyr::where(is.numeric) & !all_of(columns_to_exclude),
                   ~dplyr::case_when(TRUE ~ scale(.))),
         site = fct_reorder(site, SOC_stock_spline, .fun = "median")) 
-wa_st
   
-#wa_st_coords <- wa_st |> sf::st_coordinates() |> data.frame()
-#wa_dat_scale$X <- wa_st_coords$X
-#wa_dat_scale$Y <- wa_st_coords$Y
-#write.csv(wa_dat_scale, "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_SFcoords.csv")
-
-
-# Create neighbors list using k-nearest neighbors
-coords <- (wa_st)
-knn_nb <- knearneigh(coords, k = 6)
-nb <- knn2nb(knn_nb)
-
-# Create spatial weights
-weights <- nb2listw(nb, style = "W")
-
-# semivariogram
-inc.lag <- lag.listw(weights, resid(mod7d1))
-plot(inc.lag ~ resid(mod7d1), pch=16, asp=1)
-M1 <- lm(inc.lag ~ resid(mod7d1))
-abline(M1, col="blue")
-
-moran(resid(mod7d1), weights, length(nb), Szero(weights))
-
-# Calculate Moran's I
-moran_test <- moran.test(resid(mod7d1), weights, alternative="two.sided")
-print(moran_test)
-
-geary_test <- geary.test(resid(mod7d1), weights, alternative="two.sided")
-print(geary_test)
-
-MC<- moran.mc(resid(mod7d1), weights, nsim=999, alternative="two.sided")
-MC
-plot(MC)
+# #wa_st_coords <- wa_st |> sf::st_coordinates() |> data.frame()
+# #wa_dat_scale$X <- wa_st_coords$X
+# #wa_dat_scale$Y <- wa_st_coords$Y
+# #write.csv(wa_dat_scale, "SOIL CARBON/All_WA/data/dataframes/All_WA_SOC_ExtractPreds_SFcoords.csv")
+# 
+# 
+# # Create neighbors list using k-nearest neighbors
+# coords <- (wa_st)
+# knn_nb <- knearneigh(coords, k = 6)
+# nb <- knn2nb(knn_nb)
+# 
+# # Create spatial weights
+# weights <- nb2listw(nb, style = "W")
+# 
+# # semivariogram
+# inc.lag <- lag.listw(weights, resid(mod7d1))
+# plot(inc.lag ~ resid(mod7d1), pch=16, asp=1)
+# M1 <- lm(inc.lag ~ resid(mod7d1))
+# abline(M1, col="blue")
+# 
+# moran(resid(mod7d1), weights, length(nb), Szero(weights))
+# 
+# # Calculate Moran's I
+# moran_test <- moran.test(resid(mod7d1), weights, alternative="two.sided")
+# print(moran_test)
+# 
+# geary_test <- geary.test(resid(mod7d1), weights, alternative="two.sided")
+# print(geary_test)
+# 
+# MC<- moran.mc(resid(mod7d1), weights, nsim=999, alternative="two.sided")
+# MC
+# plot(MC)
 ```
 
 ```{r}
@@ -564,31 +636,64 @@ The model $R^2$ for `mod7` is `r round(r.sq(log10(wa_dat_scale$SOC_stock_spline)
 ```{r}
 library(effectsize)
 library(r2glmm)
-round(r.sq(log10(wa_dat_scale$SOC_stock_spline), fitted(mod7d1)), 3)
 
 # lmerTest::ranova(mod7d1, reduce.terms = FALSE)
 # lmerTest::ranova(mod7d1, reduce.terms = FALSE)
 
 #pbkrtest::PBmodcomp(mod7d1,mod6,seed=101)
 
-anova7 <- anova(mod7d1) |> data.frame() |> tibble::rownames_to_column() |> 
-  mutate(EffectSize_Eta = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[1]],
-         EffectSize_Eta2.5 = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[3]],
-         EffectSize_Eta97.5 = F_to_eta2(F.value, NumDF, DenDF, alternative = "two.sided")[[4]])
-#readr::write_csv(anova7, "SOIL CARBON/All_WA/data/dataframes/anova7d1_confint95.csv")
+ci_anova_tab_func <- function(model, data) {
+  anova <- anova(model) |> data.frame() |> tibble::rownames_to_column() |>
+    rename(Predictor = rowname) |> 
+    select(Predictor, F.value, Pr..F.) 
+  ci <- confint.merMod(model, method = "boot", 
+                     nsim = 1000, oldNames = FALSE, level = 0.95, set.seed(11))
+  r2partial <- r2glmm::r2beta(model, data = data, method = "nsj") |> data.frame() |> 
+    rename(Predictor = Effect,
+           Rsq.upper.CL = upper.CL,
+           Rsq.lower.CL = lower.CL,) |> 
+    select(Predictor, Rsq, Rsq.upper.CL, Rsq.lower.CL)
+  
+  
+  ci_anova_tab <- ci |> data.frame() |> tibble::rownames_to_column() |>
+    rename(Predictor = rowname,
+          "2.5%" = X2.5..,
+          "97.5%" = X97.5..) |> 
+    dplyr::filter(!str_detect(Predictor, "sd"), 
+                  !str_detect(Predictor, "Intercept"), 
+                  !str_detect(Predictor, "sigma")) |> 
+    full_join(y = anova, join_by(Predictor)) |> 
+    full_join(y = r2partial, join_by(Predictor)) |> 
+    mutate(across(where(is.numeric), ~base::round(.x, 2)))
+  return(ci_anova_tab)
+}
 
-ci <- confint.merMod(mod7d1, method = "boot", nsim = 1000, oldNames = FALSE, level = 0.95, set.seed(11))
-ci_df <- ci |> data.frame() |> tibble::rownames_to_column() |> 
-  rename(Predictor = rowname,
-        "2.5%" = X2.5..,
-        "97.5%" = X97.5..)
 
-#readr::write_csv(ci_df, "SOIL CARBON/All_WA/data/dataframes/mod7d1_confint95.csv")
+ci_anova_df <- ci_anova_tab_func(model = mod7d1, data = wa_dat_scale)
+ci_anova_df_w <- ci_anova_tab_func(model = modw, data = wa_dat_scale_wet)
+ci_anova_df_u <- ci_anova_tab_func(model = modu, data = wa_dat_scale_upl)
 
-r2partial <- r2glmm::r2beta(mod7d1, data = wa_dat_scale, method = "nsj") |> data.frame() 
-readr::write_csv(r2partial, "SOIL CARBON/All_WA/data/dataframes/mod7d1_r2partial.csv")
+ci_anova_df
+ci_anova_df_w
+ci_anova_df_u
+
+readr::write_csv(ci_anova_df, "SOIL CARBON/All_WA/data/dataframes/anova7d1_confint95.csv")
+readr::write_csv(ci_anova_df_w, "SOIL CARBON/All_WA/data/dataframes/anova_wet_confint95.csv")
+readr::write_csv(ci_anova_df_u, "SOIL CARBON/All_WA/data/dataframes/anova_upl_confint95.csv")
+
+```
+
+
+
+```{r}
+round(r.sq(log10(wa_dat_scale$SOC_stock_spline), fitted(mod7d1)), 3)
+round(r.sq(log10(wa_dat_scale_wet$SOC_stock_spline), fitted(modw)), 3)
+round(r.sq(log10(wa_dat_scale_upl$SOC_stock_spline), fitted(modu)), 3)
+
 
 save(mod7d1, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Model7d1_Spline.RData")
+save(modw, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Model_Wet_Spline.RData")
+save(modu, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Model_Upl_Spline.RData")
 
 PI <- predictInterval(
     mod7d1,
@@ -602,29 +707,71 @@ PI <- predictInterval(
     seed = 11
 )
 
-PI_trans <- PI |> mutate(fit_t = exp(fit),
-                   upr_t = exp(upr),
-                   lwr_t = exp(lwr),
+PIw <- predictInterval(
+    modw,
+    which = c("full"),
+    level = 0.95,
+    n.sims = 1000,
+    stat = c("median"),
+    type = c("linear.prediction"),
+    include.resid.var = TRUE,
+    returnSims = TRUE,
+    seed = 11
+)
+
+PIu <- predictInterval(
+    modu,
+    which = c("full"),
+    level = 0.95,
+    n.sims = 1000,
+    stat = c("median"),
+    type = c("linear.prediction"),
+    include.resid.var = TRUE,
+    returnSims = TRUE,
+    seed = 11
+)
+
+PI_trans <- PI |> mutate(fit_t = 10**(fit),
+                   upr_t = 10**(upr),
+                   lwr_t = 10**(lwr),
                    act = wa_dat_scale$SOC_stock_spline,
-                   fit_t_act = exp(fit_t - act))
-PI_rmse <- sqrt(abs(sum(PI_trans$fit_t - PI_trans$act)**2)/423)
+                   fit_t_act = 10**(fit_t - act))
+PIw_trans <- PIw |> mutate(fit_t = 10**(fit),
+                   upr_t = 10**(upr),
+                   lwr_t = 10**(lwr),
+                   act = wa_dat_scale_wet$SOC_stock_spline,
+                   fit_t_act = 10**(fit_t - act))
+PIu_trans <- PIu |> mutate(fit_t = 10**(fit),
+                   upr_t = 10**(upr),
+                   lwr_t = 10**(lwr),
+                   act = wa_dat_scale_upl$SOC_stock_spline,
+                   fit_t_act = 10**(fit_t - act))
 
-```
+PI_rmse <- sqrt(abs(sum((PI_trans$fit_t - PI_trans$act)**2))/nrow(wa_dat_scale))
+PI_rmse
+
+PIw_rmse <- sqrt(abs(sum((PIw_trans$fit_t - PIw_trans$act)**2))/nrow(wa_dat_scale_wet))
+PIw_rmse
+
+PIu_rmse <- sqrt(abs(sum((PIu_trans$fit_t - PIu_trans$act)**2))/nrow(wa_dat_scale_upl))
+PIu_rmse
 
 
+PI_rmse_df <- data.frame("type" = c("LMM.NonLogRMSE", "LMM.LogRMSE"), 
+                         "full" = c(PI_rmse, RMSE.merMod(mod7d1)), 
+                         "wet" = c(PIw_rmse, RMSE.merMod(modw)), 
+                         "upl" = c(PIu_rmse, RMSE.merMod(modu))) |> 
+  tidyr::pivot_longer(cols = full:upl,
+                      names_to = "LandscapeClass", 
+                      values_to = "PI_RMSE") |>
+  tidyr::pivot_wider(names_from = type, values_from = PI_RMSE)
+  
+readr::write_csv(PI_rmse_df, file = "SOIL CARBON/All_WA/data/dataframes/PI_RMSE_Dataframe.csv")
 
-```{r cache=TRUE, echo=FALSE, out.width="100%"}
-tab_model(mod7d1,bootstrap = T, seed = 11, dv.labels = c("Model 7"), 
-          show.aic = TRUE,
-          show.r2 = T,
-          file = "SOIL CARBON/All_WA/data/dataframes/mod7d1_tab_model.html")
+caret::RMSE(pred = 10**predict(mod7d1), obs = (wa_dat_scale$SOC_stock_spline))
+caret::RMSE(pred = 10**predict(modw), obs = (wa_dat_scale_wet$SOC_stock_spline))
+caret::RMSE(pred = 10**predict(modu), obs = (wa_dat_scale_upl$SOC_stock_spline))
 
-
-# mod3.1tab <- tab_model(mod3.1,bootstrap = T, seed = 11, dv.labels = c("Model 3.1"), 
-#           show.aic = TRUE,
-#           show.aicc = TRUE,
-#           file = "SOIL CARBON/All_WA/data/dataframes/mod3.1_tab_model.html")
-# mod3.1tab
 ```
 
 
@@ -637,49 +784,55 @@ Anova between sites
 # emmeans::emmeans(mod7d1, list(pairwise ~ site), adjust = "tukey")
 
 lmerTest::ranova(mod7d1)
-#lmerTest::difflsmeans(mod7d1, test.effs = "GEO", which = "GEO")
+lmerTest::difflsmeans(mod7d1, test.effs = "GEO", which = "GEO")
 emmeans::emmeans(mod7d1, list(pairwise ~ GEO), adjust = "tukey")
-```
-```{r anova geo}
-# lmerTest::difflsmeans(mod7d1, test.effs = "GEO", which = "GEO")
-# emmeans::emmeans(mod7d1, list(pairwise ~ GEO), adjust = "tukey")
 
-# lmerTest::difflsmeans(mod3.1, test.effs = "GEO", which = "GEO")
-# emmeans::emmeans(mod3.1, list(pairwise ~ GEO), adjust = "tukey")
+lmerTest::ranova(modw)
+lmerTest::difflsmeans(modw, test.effs = "GEO", which = "GEO")
+emmeans::emmeans(modw, list(pairwise ~ GEO), adjust = "tukey")
+
+lmerTest::ranova(modu)
+lmerTest::difflsmeans(modu, test.effs = "GEO", which = "GEO")
+emmeans::emmeans(modu, list(pairwise ~ GEO), adjust = "tukey")
 ```
+
 
 ```{r}
+ggplot(wa_dat_scale, aes(y = fitted(mod7d1), x = log10(SOC_stock_spline))) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0) 
 ggplot(wa_dat_scale, aes(y = 10**fitted(mod7d1), x = SOC_stock_spline)) +
   geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0) +
+  xlim(0,4.5) +
+  ylim(0, 4.5)
+
+ggplot(wa_dat_scale_wet, aes(y = fitted(modw), x = log10(SOC_stock_spline))) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0) 
+ggplot(wa_dat_scale_wet, aes(y = 10**fitted(modw), x = SOC_stock_spline)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0) +
+  xlim(0,4.5) +
+  ylim(0, 4.5)
+
+ggplot(wa_dat_scale_upl, aes(y = fitted(modu), x = log10(SOC_stock_spline))) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0)
+ggplot(wa_dat_scale_upl, aes(y = 10**fitted(modu), x = SOC_stock_spline)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
   geom_abline(slope = 1, intercept = 0) +
   xlim(0,4.5) +
   ylim(0, 4.5)
 ```
 
 
-
-
-
-#### Splitting up wetland and upland soils 
-
-Use the WIP threshold of 50% or 0.5
-
-```{r echo=FALSE, message=FALSE}
-wa_dat_scale_wet <- wa_dat_scale |> 
-    filter((WIP >= (0.5-mean(wa_dat$WIP))/sd(wa_dat$WIP))) 
-write.csv(wa_dat_scale_wet, "SOIL CARBON/All_WA/data/dataframes/All_WA_WET_SOC_ExtractPreds_Scaled.csv")
-pred_wa_dat_scale_wet <- predict(mod7d1, wa_dat_scale_wet)
-    
-wa_dat_scale_upl <- wa_dat_scale |> 
-    filter((WIP < (0.5-mean(wa_dat$WIP))/sd(wa_dat$WIP))) #|> 
-write.csv(wa_dat_scale_upl, "SOIL CARBON/All_WA/data/dataframes/All_WA_UPL_SOC_ExtractPreds_Scaled.csv")
-pred_wa_dat_scale_upl <- predict(mod7d1, wa_dat_scale_upl)
-
-wa_dat_scale_mes <- wa_dat_scale |> 
-    filter((WIP >= (0.25-mean(wa_dat$WIP))/sd(wa_dat$WIP)) & (WIP <= (0.75-mean(wa_dat$WIP))/sd(wa_dat$WIP))) #|> 
-write.csv(wa_dat_scale_mes, "SOIL CARBON/All_WA/data/dataframes/All_WA_MES_SOC_ExtractPreds_Scaled.csv")
-
-```
 
 
 
@@ -704,17 +857,17 @@ cors_wetuplmes <- function(data, cor_vars){
 }
 
 
-wet_cors <- cors_wetuplmes(wa_dat_scale_wet, c("MAP", "WIP", "CHM", "HLI", "lower_depth"))
-mes_cors <- cors_wetuplmes(wa_dat_scale_mes, c("MAP", "WIP", "CHM", "HLI", "lower_depth"))
-upl_cors <- cors_wetuplmes(wa_dat_scale_upl, c("MAP", "WIP", "CHM", "HLI", "lower_depth"))
+wet_cors <- cors_wetuplmes(wa_dat_scale_wet, c("MAP", "WIP", "grad_1000", "HLI", "lower_depth"))
+#mes_cors <- cors_wetuplmes(wa_dat_scale_mes, c("MAP", "WIP", "CHM", "HLI", "lower_depth"))
+upl_cors <- cors_wetuplmes(wa_dat_scale_upl, c("MAP", "WIP", "grad_1000", "HLI", "lower_depth"))
 
 wet_cors$land <- "Wetland"
-mes_cors$land <- "Mesic"
+#mes_cors$land <- "Mesic"
 upl_cors$land <- "Upland"
 
-all_cors <- rbind(wet_cors, mes_cors, upl_cors)
+all_cors <- rbind(wet_cors, upl_cors)
 
-readr::write_csv(all_cors, "SOIL CARBON/All_WA/data/dataframes/Correlations_WetUplMes.csv")
+readr::write_csv(all_cors, "SOIL CARBON/All_WA/data/dataframes/Correlations_WetUpl.csv")
 ```
 
 
@@ -807,72 +960,6 @@ write.csv(partial_df, "SOIL CARBON/All_WA/data/dataframes/All_WA_PartialCorrelat
 ```
 
 
-#### Examine what drives higher SOC stocks
-
-Trying to do quantile regression or some method that analyzes the highest SOC stock points 
-
-```{r include=FALSE}
-
-quants <- wa_dat_scale |> 
-  summarise(quantile = scales::percent(c(0.25, 0.5, 0.98)),
-            SOC_stock_spline_quant = quantile(SOC_stock_spline, c(0.25, 0.5, 0.98)))
-
-wa_dat_highSOC <- wa_dat_scale |> filter(SOC_stock_spline > quants[3,2])
-wa_dat_highSOC |> select(where(is.numeric)) |> summarise(across(everything(), 
-                                                                ~ (max(.x, na.rm = TRUE))))
-
-wa_dat_highSOC_num <- wa_dat_highSOC |> 
-    dplyr::select(SOC_stock_spline,
-               #lower_depth,
-               CHM,
-               MAT,
-               MAP,
-               #TSeason,
-              # PSeason,
-               #DTM,
-               HLI,
-               NDYI,
-               NDVI,
-               MNDWI,
-               EVI, # Enhanced vegetation index
-               WIP) |> as.matrix()
-
-ggcorrplot(cor(wa_dat_highSOC_num), method = "square", type = "full", lab = T, lab_size = 3)
-
-
-mod_highSOC <- lm(log10(SOC_stock_spline) ~ HLI+NDYI, 
-                         REML = FALSE,
-                         data = wa_dat_highSOC)
-
-anova(mod_highSOC)
-
-tab_model(mod_highSOC, show.aic = T)
-r.sq(log10(wa_dat_highSOC$SOC_stock_spline), fitted(mod_highSOC))
-
-```
-
-LQMM package
-```{r cache=TRUE}
-library(lqmm)
-
-fit.lqmm <- lqmm(log10(SOC_stock_spline) ~  CHM + GEO + HLI + WIP + lower_depth*MAP, random = ~lower_depth,	group = sample_ID,
-	data = wa_dat_scale, tau = c(0.5,0.75, 0.9, 0.95), nK = 11)
-fit.lqmm
-
-save(fit.lqmm, file = "SOIL CARBON/All_WA/analysis/models/mod7d1_fit_lqmm.RData")
-
-
-fit.lqmm_summ <- summary(fit.lqmm, R=100, seed = 11)
-
-fit.lqmm_df <- coef(fit.lqmm) |> data.frame() |> tibble::rownames_to_column(var = "Predictor")
-
-fit.lqmm_summ_df <- (fit.lqmm_summ$tTable$`0.95`) |> data.frame() |> tibble::rownames_to_column(var = "Predictor")
-
-readr::write_csv(fit.lqmm_df, "SOIL CARBON/All_WA/data/dataframes/mod7d1_lqmm_coef_df.csv")
-readr::write_csv(fit.lqmm_summ_df, "SOIL CARBON/All_WA/data/dataframes/mod7d1_lqmm_summary_df.csv")
-
-fitted.lqmm <- predict(fit.lqmm)
-```
 
 
 
@@ -887,70 +974,22 @@ interactions::interact_plot(mod7d1, pred = lower_depth, modx = MAP,
                             y.label = "Fitted Model SOC Stock",
                             legend.main = "MAP",
                             interval = TRUE, data = wa_dat_scale)
-# DTMsitewet <- interactions::interact_plot(mod3.1_wet, pred = DTM, modx = site, plot.points = T, 
-#                                           plot.shape = T,
-#                             x.label = "DTM Wetlands", 
-#                             y.label = "Fitted Model SOC Stock",
-#                             legend.main = "Site",
-#                             interval = TRUE, data = wa_dat_scale_wet)
-# DTMsiteupl <- interactions::interact_plot(mod3.1_upl, pred = DTM, modx = site, plot.points = T, 
-#                                           plot.shape = T,
-#                             x.label = "DTM Uplands", 
-#                             y.label = "Fitted Model SOC Stock",
-#                             legend.main = "Site",
-#                             interval = TRUE, data = wa_dat_scale_upl)
-# # HLIwip<- interactions::interact_plot(mod3.1, pred = WIP, modx = site, plot.points = T, plot.shape = T,
-# #                             #x.label = "HLI", 
-# #                             y.label = "Fitted Model SOC Stock",
-# #                             #legend.main = "WIP",
-# #                             interval = TRUE, data = wa_dat_scale)
-# 
-# WIPsite <- interactions::interact_plot(mod3.1, pred = WIP, modx = site, plot.points = T, 
-#                                        plot.shape = T, 
-#                             x.label = "WIP All", 
-#                             y.label = "Fitted Model SOC Stock",
-#                             legend.main = "Site",
-#                             interval = TRUE, data = wa_dat_scale)
-# WIPsitewet <- interactions::interact_plot(mod3.1_wet, pred = WIP, modx = site, plot.points = T, 
-#                                           plot.shape = T,
-#                             x.label = "WIP Wetlands", 
-#                             y.label = "Fitted Model SOC Stock",
-#                             legend.main = "Site",
-#                             interval = TRUE, data = wa_dat_scale_wet)
-# WIPsiteupl <- interactions::interact_plot(mod3.1_upl, pred = WIP, modx = site, plot.points = T, 
-#                                           plot.shape = T,
-#                             x.label = "WIP Uplands", 
-#                             y.label = "Fitted Model SOC Stock",
-#                             legend.main = "Site",
-#                             interval = TRUE, data = wa_dat_scale_upl)
-# 
-# ggarrange(DTMsite, DTMsiteupl+rremove("ylab"), DTMsitewet+rremove("ylab"), 
-#           WIPsite, WIPsiteupl+rremove("ylab"), WIPsitewet+rremove("ylab"),
-#           ncol = 3, nrow = 2, common.legend = TRUE)
-```
 
+interactions::interact_plot(modw, pred = lower_depth, modx = MAP,
+                                       plot.points = T,
+                                       plot.shape = T,
+                            x.label = "depth",
+                            y.label = "Fitted Model SOC Stock",
+                            legend.main = "MAP",
+                            interval = TRUE, data = wa_dat_scale_wet)
 
-#### Splitting up by site 
-
-- Colville = Arid with hotter summers
-- Mashel = Mesic with warm summers
-- Hoh = Wet with humid summers 
-
-
-```{r}
-hoh_dat_scale <- wa_dat_scale |> filter(site == "HOH")
-mas_dat_scale <- wa_dat_scale |> filter(site == "MAS")
-col_dat_scale <- wa_dat_scale |> filter(site == "COL")
-
-hoh_datpred <- predict(mod7d1, newdata = hoh_dat_scale)
-mas_datpred <- predict(mod7d1, newdata = mas_dat_scale)
-col_datpred <- predict(mod7d1, newdata = col_dat_scale)
-```
-
-
-### Splitting up by Org Min
-
-```{r}
+interactions::interact_plot(modu, pred = lower_depth, modx = MAP,
+                                       plot.points = T,
+                                       plot.shape = T,
+                            x.label = "depth",
+                            y.label = "Fitted Model SOC Stock",
+                            legend.main = "MAP",
+                            interval = TRUE, data = wa_dat_scale_upl)
 
 ```
 
@@ -959,12 +998,54 @@ col_datpred <- predict(mod7d1, newdata = col_dat_scale)
 GAMMs because of under prediction
 
 ```{r}
+
+gammod <- gam((SOC_stock_spline) ~ + GEO + s(dev_1000) + 
+                 (HLI) + lower_depth + s(MAP) + (lower_depth) +  s(WIP) + 
+               s(sample_ID, bs = "re"), 
+              family = Gamma(link = "log"), 
+              data = wa_dat_scale)
+
+
+summary(gammod)
+plot(gammod, residuals = T, pch = 9)
+AIC(gammod)
+anova(gammod)
+
+
+```
+
+```{r}
+ggplot(wa_dat_scale, aes(y = 10**predict(gammod, newdata = wa_dat_scale), x = SOC_stock_spline)) +
+  geom_point() +
+  geom_smooth(method = "lm") + 
+  geom_abline(slope = 1, intercept = 0) +
+  xlim(0,4.5) +
+  ylim(0, 4.5)
+```
+
+
+Random Forest 
+
+```{r}
 library(randomForest)
 set.seed(11)
 
-rf_dat <- wa_dat_scale |> select(SOC_stock_spline, WIP, MAP, MAT, CHM, HLI, GEO, EVI, lower_depth)
+rf_dat <- wa_dat_scale |> select(SOC_stock_spline, WIP, MAP, 
+                                 MAT, CHM, HLI, GEO, EVI, lower_depth,
+                                 dev_1000, dev_50, grad_1000, grad_50) |> 
+  mutate(GEO = as.character(GEO))
+rf_dat_w <- wa_dat_scale |> select(SOC_stock_spline, WIP, MAP, 
+                                 MAT, CHM, HLI, GEO, EVI, lower_depth,
+                                 dev_1000, dev_50, grad_1000, grad_50) |> 
+  mutate(GEO = as.character(GEO)) |> 
+  filter(WIP >= 0.5 - attr(wa_dat_scale$WIP, "scaled:center")/attr(wa_dat_scale$WIP, "scaled:scale"))
+rf_dat_u <- wa_dat_scale |> select(SOC_stock_spline, WIP, MAP, 
+                                 MAT, CHM, HLI, GEO, EVI, lower_depth,
+                                 dev_1000, dev_50, grad_1000, grad_50) |> 
+  mutate(GEO = as.character(GEO)) |> 
+  filter(WIP < 0.5 - attr(wa_dat_scale$WIP, "scaled:center")/attr(wa_dat_scale$WIP, "scaled:scale"))
 
-train.index <- as.vector(sample(c(1:nrow(rf_dat)), 0.75*nrow(rf_dat), replace=F))
+train.index <- as.vector(sample(c(1:nrow(rf_dat)), 0.65*nrow(rf_dat), replace=F))
 train <- rf_dat[train.index,]
 train$GEO <- as.character(train$GEO)
 
@@ -982,7 +1063,7 @@ tuneRF(x = train[, 2:ncol(train)], y = (train$SOC_stock_spline), mtryStart = 3, 
 ```{r}
 rf_model <- randomForest((SOC_stock_spline) ~ .,
                          sampsize = nrow(train),
-                         ntree = 1000, mtry = 6, 
+                         ntree = 1000, mtry = 3, 
                          importance = TRUE, data = train, set.seed(11))
 rf_model
 plot(rf_model)
@@ -991,33 +1072,62 @@ save(rf_model, file = "SOIL CARBON/All_WA/analysis/models/ALl_WA_RandomForest.RD
 
 rf.train <- predict(rf_model, newdata = train)
 rf.test <- predict(rf_model, newdata = test)
+rf.all <- predict(rf_model, newdata = rf_dat)
+rf.wet <- predict(rf_model, newdata = rf_dat_w)
+rf.upl <- predict(rf_model, newdata = rf_dat_u)
 
 randomForest::varImpPlot(rf_model)
 
-errdf <- data.frame("error variable" = c("MAE", "MAE^2", "RMSE Test", "R^2 on test dataset"), 
-                    "value" = c(caret::MAE(pred = rf.train, obs = (train$SOC_stock_spline)),
-                                caret::MAE(pred = rf.train, obs = (train$SOC_stock_spline))**2,
-                                caret::RMSE(pred = rf.test, obs = (test$SOC_stock_spline)),
-                                caret::R2(pred = rf.test, obs = (test$SOC_stock_spline))))
-errdf |> kbl() |>
-  kable_classic_2("hover", full_width = F)
+errdf <- data.frame("LandscapeClass" = c("Full", "Wetland", "Upland"), 
+                    "RFM.R2test" = c(caret::R2(pred = rf.test, obs = (test$SOC_stock_spline)),
+                                      caret::R2(pred = rf.wet, obs = (rf_dat_w$SOC_stock_spline)),
+                                      caret::R2(pred = rf.upl, obs = (rf_dat_u$SOC_stock_spline))),
+                    "RFM.RMSEtest" = c(caret::RMSE(pred = rf.test, obs = (test$SOC_stock_spline)),
+                                      caret::RMSE(pred = rf.wet, obs = (rf_dat_w$SOC_stock_spline)),
+                                      caret::RMSE(pred = rf.upl, obs = (rf_dat_u$SOC_stock_spline))))
+                    
+readr::write_csv(errdf, file = "SOIL CARBON/All_WA/data/dataframes/RFM_ErrorDF.csv")
 
 ```
 
 ```{r}
-ggplot(train, aes(x = SOC_stock_spline, y = (rf.train), colour = WIP)) +
-  geom_point() + 
+ggplot(train, aes(x = (SOC_stock_spline), y = (rf.train), colour = WIP)) +
+  geom_point(, show.legend = F) + 
   geom_abline(slope = 1, intercept = 0) + 
-  geom_smooth(method = "lm") +
+  geom_smooth(method = "lm", show.legend = F) +
   xlim(0,4) + 
   ylim(0,4)
 
-ggplot(test, aes(x = SOC_stock_spline, y = (rf.test), colour = WIP)) +
-  geom_point() + 
+ggplot(test, aes(x = (SOC_stock_spline), y = (rf.test), colour = WIP)) +
+  geom_point(, show.legend = F) + 
   geom_abline(slope = 1, intercept = 0) + 
-  geom_smooth(method = "lm") +
+  geom_smooth(method = "lm", show.legend = F) +
   xlim(0,4) + 
   ylim(0,4)
+
+ggplot(rf_dat, aes(x = (SOC_stock_spline), y = (rf.all), colour = MAP)) +
+  geom_point(, show.legend = F) + 
+  geom_abline(slope = 1, intercept = 0) + 
+  geom_smooth(method = "lm", show.legend = F) +
+  xlim(0,4) + 
+  ylim(0,4)
+
+ggplot(rf_dat[rf_dat$WIP >= (0.5+0.4086574)*0.2938774,], aes(x = (SOC_stock_spline), y = (rf.wet), colour = (WIP+0.4086574)*0.2938774)) +
+  geom_point(show.legend = F) + 
+  geom_abline(slope = 1, intercept = 0) + 
+  geom_smooth(method = "lm", show.legend = F) +
+  xlim(0,4) + 
+  ylim(0,4)
+ggplot(rf_dat[rf_dat$WIP < (0.5+0.4086574)*0.2938774,], aes(x = (SOC_stock_spline), y = (rf.upl), colour = (WIP+0.4086574)*0.2938774)) +
+  geom_point(show.legend = F) + 
+  geom_abline(slope = 1, intercept = 0) + 
+  geom_smooth(method = "lm", show.legend = F) +
+  xlim(0,4) + 
+  ylim(0,4)
+
+
+
+r.sq((rf_dat$SOC_stock_spline), rf.all)
 ```
 
 ```{r}
@@ -1040,9 +1150,38 @@ lower_pdp <- data.frame(randomForest::partialPlot(rf_model, test, lower_depth, p
         geom_line(aes(x = x, y = y))+
     xlab("Depth") +
     ylab(expression('Model Prediction Effect'))
+grad_pdp <- data.frame(randomForest::partialPlot(rf_model, test, grad_50, plot = FALSE)) |> 
+    ggplot() +
+        geom_line(aes(x = x, y = y))+
+    xlab("Slope 50m") +
+    ylab(expression('Model Prediction Effect'))
 
 
 
-grid.arrange(wip_pdp, lower_pdp, MAP_pdp, ncol = 3, nrow=1)
+rf_pdp_plots <- grid.arrange(wip_pdp, lower_pdp, MAP_pdp, grad_pdp, ncol = 2, nrow=2) 
+
+save(rf_pdp_plots, file = "SOIL CARBON/All_WA/writing/Figures/RFM_PDP_plots.RData")
+```
+
+```{r}
+library(kernelshap)
+library(shapviz)
+
+rtbx <- rf_dat[sample(nrow(rf_dat), size = 200), -1]
+bgx <- rf_dat[sample(nrow(rf_dat), size = 50),]
+
+ks <- kernelshap(object = rf_model, X = rtbx)
+ks
+
+save(ks, file = "SOIL CARBON/All_WA/analysis/models/KernelShap.RData")
+```
+
+
+```{r}
+ks <- get(load("SOIL CARBON/All_WA/analysis/models/KernelShap.RData"))
+
+sv_importance(shapviz(ks))
+sv_dependence(shapviz(ks), v = c("WIP", "MAP", "lower_depth", "grad_50"), color_var = "WIP")
+
 ```
 

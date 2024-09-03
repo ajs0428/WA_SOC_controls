@@ -66,7 +66,9 @@ Next, create a subset of the data with only the predictor variables
 
 ```{r}
 
-wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2)) |>
+wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(depth_cm, BD_g_cm3, carbon_perc, carbon_stock_g_cm2,
+                                             #SOCperc, StudyArea, helper
+                                             )) |>
     group_by(sample_ID) |>
     filter(row_number() == 1) |> 
     dplyr::select(sample_ID, everything()) |>
@@ -77,6 +79,7 @@ wa_hor_dat_sub <- wa_dat |> dplyr::select(-c(depth_cm, BD_g_cm3, carbon_perc, ca
 In order to generate mapped predictions of SOC stock, we use adjust the dataset from observations of horizons of varying depths to observations of standard depth increments. Specifically, we use the mass-preserving spline method of Bishop et al (1999) (doi: 10.1016/S0016-7061(99)00003-8) to generate SOC stock estimates for intervals of 0-30cm, 30-60cm, and 60-100cm
 ```{r eval=FALSE}
 wa_spl <- mpspline_tidy(obj = wa_dat_horC, var_name = "carbon_stock_g_cm2", d = c(0, 15, 30, 60, 100, 150, 200)) 
+
 wa_spl_datperc_0_15_30_60_100_150_200 <- wa_spl$est_dcm |>
     left_join(y = wa_hor_dat_sub, by = join_by(sample_ID), relationship = "many-to-one") |>
     rename(SOC_stock_spline = SPLINED_VALUE,
@@ -86,7 +89,7 @@ wa_spl_datperc_0_15_30_60_100_150_200 <- wa_spl$est_dcm |>
 (wa_spl_datperc_0_15_30_60_100_150_200)
 wa_spl_datperc_0_15_30_60_100_150_200 |> filter(SOC_stock_spline < 0.003)
 
-write.csv(wa_spl_datperc_0_15_30_60_100_150_200, file = "SOIL CARBON/All_WA/data/dataframes/wa_spl_datperc_0_15_30_60_100_150_200.csv")
+#write.csv(wa_spl_datperc_0_15_30_60_100_150_200, file = "SOIL CARBON/All_WA/data/dataframes/wa_spl_datperc_0_15_30_60_100_150_200.csv")
 
 ```
 

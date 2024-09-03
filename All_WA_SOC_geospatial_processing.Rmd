@@ -253,6 +253,7 @@ Climate data from WorldClim
 - Use CHM as reference
 
 ```{r}
+#| eval: false
 prism_ppt <- rast("PRISM_Climate/PRISM_ppt_30yr_normal_800mM4_annual_asc/PRISM_ppt_30yr_normal_800mM4_annual_asc.asc")
 prism_temp <- rast("PRISM_Climate/PRISM_tmean_30yr_normal_800mM4_annual_asc/PRISM_tmean_30yr_normal_800mM4_annual_asc.asc")
 prism_vpd <- rast("PRISM_Climate/PRISM_vpdmax_30yr_normal_800mM5_annual_asc/PRISM_vpdmax_30yr_normal_800mM5_annual_asc.asc")
@@ -289,7 +290,16 @@ col_clim <- rast("SOIL CARBON/All_WA/data/Rasters/colville_climate_data.tif")
 ```
 
 
-LANDFIRE existing vegetation type 
+#### LANDFIRE existing vegetation type 
+
+From Yu et al., 2021:
+- “Eleven vegetation types defined from the National Land Cover Database and provided by NEON were binned into four broad types based on preliminary analyses: 
+  - deciduous/evergreen/mixed forest (hereafter forest),
+  - grassland-herbaceous/pasture-hay/shrub-scrub/dwarf-scrub (grassland/shrubland), 
+  - cultivated crops (cropland), and 
+  - emergent herbaceous wetlands/sedge herbaceous/woody wetlands (wetland).” 
+  
+  ([Yu et al., 2021, p. 4](zotero://select/library/items/Q2EDH8L3)) ([pdf](zotero://open-pdf/library/items/2KX4MEH4?page=4&annotation=3KPFC9NZ))
 
 ```{r eval=FALSE}
 
@@ -309,53 +319,58 @@ col_studyarea_4326 <- project(col_studyarea, "EPSG:4326")
 lf_hoh <- crop(lf_wa_rcl, hoh_studyarea_4326, mask = TRUE) |>
   project("EPSG:2855") |>
   resample(y = hoh_chm, method = "near") |>
-  mask(mask = hoh_chm, filename = "SOIL CARBON/All_WA/data/Rasters/hoh_LANDFIRE.tif", overwrite = TRUE)
+  mask(mask = hoh_chm, 
+       filename = "SOIL CARBON/All_WA/data/Rasters/NonPredictors/hoh_LANDFIRE.tif", overwrite = TRUE)
 lf_mas <- crop(lf_wa_rcl, mas_studyarea_4326, mask = TRUE)|>
   project("EPSG:2856") |>
   resample(y = mas_chm, method = "near") |> 
-  mask(mask = mas_chm, filename = "SOIL CARBON/All_WA/data/Rasters/mashel_LANDFIRE.tif", overwrite = TRUE)
+  mask(mask = mas_chm, 
+       filename = "SOIL CARBON/All_WA/data/Rasters/NonPredictors/mashel_LANDFIRE.tif", overwrite = TRUE)
 lf_col <- crop(lf_wa_rcl, col_studyarea_4326, mask = TRUE) |>
   project("EPSG:2855") |>
   resample(y = col_chm, method = "near") |> 
-  mask(mask = col_chm, filename = "SOIL CARBON/All_WA/data/Rasters/colville_LANDFIRE.tif", overwrite = TRUE)
+  mask(mask = col_chm, 
+       filename = "SOIL CARBON/All_WA/data/Rasters/NonPredictors/colville_LANDFIRE.tif", overwrite = TRUE)
 
+LF_reclass_func <- function(rastcat, class_df, name){
+  reclass_df <- levels(rastcat)[[1]] |> as_tibble() |> 
+    left_join(y = class_df, by = join_by(ID == values)) |> select(-EVT) |> 
+    mutate(names = case_when(
+      str_detect(names, pattern = regex("spruce|hemlock|fir|pine|conifer|Tsuga|larch|Evergreen",
+                                        ignore_case = T)) ~ "Conifer",
+      str_detect(names, pattern = regex("shrub|sagebrush|Bush", 
+                                        ignore_case = T)) ~ "Shrubland",
+      str_detect(names, pattern = regex("grass|Savanna|Herbaceous|crop|Pasture|Wheat", 
+                                        ignore_case = T)) ~ "Herbaceous",
+      str_detect(names, pattern = regex("Oak|Mahogany|Deciduous|Aspen|Orchard", 
+                                        ignore_case = T)) ~ "Deciduous",
+      str_detect(names, pattern = regex("Mixed|swamp|riparian", 
+                                        ignore_case = T)) ~ "Mixed",
+      str_detect(names, pattern = regex("Sparse|barren|Volcanic|snow", 
+                                        ignore_case = T)) ~ "SparseBarren",
+      str_detect(names, pattern = regex("developed|mines", 
+                                        ignore_case = T)) ~ "Urban",
+      .default = names))
+  
+  lf_recat <- categories(rastcat, layer=1, value = reclass_df, active = 1)
+  coltab(lf_recat) <- NULL
+  writeRaster(lf_recat, paste0("SOIL CARBON/All_WA/data/Rasters/", name, "_Landfire_reclass", ".tif"), overwrite = TRUE)
+  return(lf_recat)
+}
 
-lf_hoh_classes <- levels(lf_hoh)[[1]] |> as_tibble() |> 
-  left_join(y = lf_classes, by = join_by(ID == values)) |> select(-EVT) |> 
-  mutate(names = case_when(
-    str_detect(names, pattern = fixed("spruce", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("hemlock", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("fir", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("pine", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("conifer", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("shrub", ignore_case = T)) ~ "Shrubland",
-      str_detect(names, pattern = fixed("sagebrush", ignore_case = T)) ~ "Shrubland",
-      str_detect(names, pattern = fixed("grass", ignore_case = T)) ~ "Herbaceous",
-      str_detect(names, pattern = fixed("Tsuga", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("larch", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("Oak", ignore_case = T)) ~ "Deciduous",
-      str_detect(names, pattern = fixed("Deciduous", ignore_case = T)) ~ "Deciduous",
-      str_detect(names, pattern = fixed("Evergreen", ignore_case = T)) ~ "Conifer",
-      str_detect(names, pattern = fixed("Mixed", ignore_case = T)) ~ "Mixed",
-      str_detect(names, pattern = fixed("Sparse", ignore_case = T)) ~ "Mixed",
-      str_detect(names, pattern = fixed("Aspen", ignore_case = T)) ~ "Deciduous",
-      str_detect(names, pattern = fixed("Mahogany", ignore_case = T)) ~ "Deciduous",
-      str_detect(names, pattern = fixed("Savanna", ignore_case = T)) ~ "Herbaceous",
-      str_detect(names, pattern = fixed("Riparian", ignore_case = T)) ~ "Mixed",
-      str_detect(names, pattern = fixed("swamp", ignore_case = T)) ~ "Mixed",
-      str_detect(names, pattern = fixed("Volcanic", ignore_case = T)) ~ "Mixed",
-      str_detect(names, pattern = fixed("Herbaceous", ignore_case = T)) ~ "Herbaceous",
-    .default = names))
+lf_hoh_classes <- LF_reclass_func(lf_hoh, class_df = lf_classes, name = "Hoh")
+lf_mas_classes <- LF_reclass_func(lf_mas, class_df = lf_classes, name = "Mashel")
+lf_col_classes <- LF_reclass_func(lf_col, class_df = lf_classes, name = "Colville")
 
-lf_hoh_names <- categories(lf_hoh, layer=1, value = lf_hoh_classes, active = 1)
-coltab(lf_hoh_names) <- NULL
-plot(lf_hoh_names)
+plot(lf_hoh_classes)
+plot(lf_mas_classes)
+plot(lf_col_classes)
 ```
 
 ```{r}
-lf_hoh <- rast("SOIL CARBON/All_WA/data/Rasters/hoh_LANDFIRE.tif")
-lf_mas <- rast("SOIL CARBON/All_WA/data/Rasters/mashel_LANDFIRE.tif")
-lf_col <-rast("SOIL CARBON/All_WA/data/Rasters/colville_LANDFIRE.tif")
+lf_hoh <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_Landfire_reclass.tif")
+lf_mas <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_Landfire_reclass.tif")
+lf_col <-rast("SOIL CARBON/All_WA/data/Rasters/Colville_Landfire_reclass.tif")
 ```
 
 
@@ -419,18 +434,68 @@ mas_wip <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_WIP_Final_2856.tif")[[2]
 hoh_wip <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_WIP_Final_2855.tif")
 ```
 
+Topo data from WIP 
+```{r eval=FALSE, include=FALSE}
+topo_resample_write <- function(topo_path, WIP, Watershed, rastpath){
+  filelist <- list.files(topo_path, 
+                         pattern = "*.tif", full.names = TRUE,
+                         ignore.case = TRUE,
+                         include.dirs = FALSE) |> 
+  str_subset(pattern = "grad|dev") |>
+  str_subset(pattern = "_50.tif|_300.tif|_1000.tif") |> 
+  str_subset(pattern = "^(?!.*xml)") |> 
+  str_subset(pattern = "^(?!.*ovr)")
+  
+  f <- lapply(filelist, terra::rast)
 
+  rs <- list()
+  for (i in 1:length(f)) {
+    if(res(f[[i]])[[1]] != res(WIP)[[1]]){
+      rs[[i]] <- resample(f[[i]], WIP, method='near',
+                         threads=TRUE) 
+    } else {
+      rs[[i]] <- f[[i]]
+    }
+  }
+
+  s <- rast(rs) 
+  s <- terra::project(s, (WIP), method = "near", filename = paste0(getwd(),
+                               "/",
+                               rastpath,
+                               Watershed,
+                               "_TopoStack",
+                               ".tif"), overwrite = TRUE)
+}
+```
 
 ```{r}
+list.files("Mashel/Mashel_WIP_2024/DataExport", 
+                        pattern = "*.tif", full.names = TRUE,
+                        ignore.case = TRUE,
+                        include.dirs = FALSE) |> 
+ str_subset(pattern = "grad|dev") |>
+ str_subset(pattern = "_50.tif|_300.tif|_1000.tif") |> 
+ str_subset(pattern = "^(?!.*xml)") |> 
+ str_subset(pattern = "^(?!.*ovr)")
+```
+
+
+```{r eval=FALSE, include=FALSE}
+rastpath <- "SOIL CARBON/All_WA/data/Rasters"
+
+topo_resample_write(topo_path = "WIP/Hoh_data/TopoIndices/", WIP = hoh_wip, Watershed = "Hoh", rastpath = rastpath)
+
+topo_resample_write(topo_path = "Mashel/Mashel_WIP_2024/DataExport/", WIP = mas_wip, Watershed = "Mashel", rastpath = rastpath)
+
+topo_resample_write(topo_path = "Colville/Colville_WIP_2024/DataExport/", WIP = col_wip, Watershed = "Colville", rastpath = rastpath)
+
+```
+
+Predictor stack resampling
+```{r}
 stack_resampling <- function(Watershed, WIP, path) {
-  # stopifnot(file.exists(paste0(getwd(), 
-  #                              "/", 
-  #                              path, 
-  #                              Watershed, 
-  #                              "_PredictorStack", 
-  #                              ".tif")) == FALSE)
             
-  filelist <- list.files("SOIL CARBON/All_WA/data/Rasters/", 
+  filelist <- list.files("SOIL CARBON/All_WA/data/Rasters", 
                          pattern = Watershed, full.names = TRUE,
                          ignore.case = TRUE,
                          include.dirs = FALSE) |> 
@@ -447,6 +512,8 @@ stack_resampling <- function(Watershed, WIP, path) {
     if(res(f[[i]])[[1]] != res(WIP)[[1]]){
       rs[[i]] <- resample(f[[i]], WIP, method='near', 
                          threads=TRUE)
+    } else if(crs(f[[i]], describe = TRUE)$code != crs(WIP, describe = TRUE)$code){
+      rs[[i]] <- project(f[[i]], WIP, method = "near")
     } else {
       rs[[i]] <- f[[i]]
     }
@@ -465,9 +532,9 @@ stack_resampling <- function(Watershed, WIP, path) {
 ```
 
 
-```{r eval=FALSE, include=FALSE}
+```{r}
 list.files("SOIL CARBON/All_WA/data/Rasters", 
-                         pattern = "Colville", full.names = TRUE,
+                         pattern = "Mashel", full.names = TRUE,
                          ignore.case = TRUE,
                          include.dirs = FALSE) |> 
               str_subset(pattern = "^(?!.*flood)") |>
@@ -477,6 +544,7 @@ list.files("SOIL CARBON/All_WA/data/Rasters",
               str_subset(pattern = "^(?!.*slpasp)") |>
               str_subset(pattern = "^(?!.*fullmodel_v08)")
 ```
+
 
 
 ```{r eval=FALSE}
@@ -495,7 +563,6 @@ hoh_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_Predictor
                     geomorphons = Hoh_geomorphons,
                     WIP = WET,
                     CHM = Hoh_CanopyHeight) 
-
 writeRaster(hoh_stack, "SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack_Class.tif", overwrite = TRUE)
   
 mas_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mashel_PredictorStack.tif") |> tidyterra::select(-UPL) |>

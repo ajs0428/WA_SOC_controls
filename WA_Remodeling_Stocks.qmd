@@ -1,0 +1,498 @@
+---
+title: "Aggregated SOC stock analysis and modeling for Washington State"
+format: html
+output:
+  html_document:
+    df_print: paged
+    theme: readable
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+h1, h3, h4 {
+  text-align: center;
+}
+```
+
+```{r setup, include=FALSE}
+library(formatR)
+knitr::opts_chunk$set(echo = FALSE, fig.align = "center", fig.show = "hold", time_it = TRUE, dpi = 100, message = FALSE, warning = FALSE, results = "hide")
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 60), tidy = T, collapse = TRUE)
+knitr::opts_knit$set(root.dir = '/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/')
+library(lme4)
+library(lmerTest)
+library(terra)
+library(tidyverse)
+library(ggcorrplot)
+library(MuMIn)
+library(mgcv)
+library(webshot)
+library(kableExtra)
+library(rgl)
+
+knitr::knit_hooks$set(webgl = hook_webgl)
+rgl::setupKnitr(autoprint = TRUE)
+
+r.sq <- function(y,y.fitted){
+    res <- y-y.fitted
+    1-sum(res^2)/sum((y-mean(y))^2)
+}
+```
+
+
+Function to calculate SOC stocks for different depth intervals
+```{r}
+wa_hor <- read.csv("SOIL CARBON/All_WA/data/dataframes/All_WA_horizons.csv")
+
+stocks_func <- function(horizons){
+    stopifnot("sample_ID" %in% names(horizons))
+    stopifnot("depth_cm" %in% names(horizons))
+    stopifnot("carbon_perc" %in% names(horizons))
+    stopifnot("BD_g_cm3" %in% names(horizons))
+    stopifnot("rock_perc" %in% names(horizons))
+    
+    stocks <- horizons |>  dplyr::group_by(sample_ID) |>
+        mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
+                               .default = lag(depth_cm)), 
+               bottom = depth_cm, 
+               center = abs(top - (top - bottom)/2)) |>
+        mutate(thick30 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                                   bottom > 30 & top <= 30 ~ bottom - (bottom -30)-lag(bottom),
+                                   bottom > 30 & top >= 30 ~ 0,
+                                   bottom < 30 & bottom - lag(bottom) < 0 ~ bottom,
+                                   bottom < 30 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                                   bottom == 30 ~ bottom - lag(bottom),
+                                   .default = 0),
+               SOC_hor_stock30 = ((carbon_perc/100)*BD_g_cm3*thick30*(1-(rock_perc/100)))) |>
+        # clay_hor_30 = (((clay/100)*thick30)/30*(1-(rock_perc/100))),
+        # silt_hor_30 = (((silt/100)*thick30)/30*(1-(rock_perc/100))),
+        # sand_hor_30 = (((sand/100)*thick30)/30*(1-(rock_perc/100)))) |>
+        mutate(thick60 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                                   bottom > 60 & top <= 60 ~ bottom - (bottom -60)-lag(bottom),
+                                   bottom > 60 & top >= 60 ~ 0,
+                                   bottom < 60 & bottom - lag(bottom) < 0 ~ bottom,
+                                   bottom < 60 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                                   bottom == 60 ~ bottom - lag(bottom),
+                                   .default = 0),
+               SOC_hor_stock60 = ((carbon_perc/100)*BD_g_cm3*thick60*(1-(rock_perc/100)))) |>
+        # clay_hor_60 = (((clay/100)*thick60)/60*(1-(rock_perc/100))),
+        # silt_hor_60 = (((silt/100)*thick60)/60*(1-(rock_perc/100))),
+        # sand_hor_60 = (((sand/100)*thick60)/60*(1-(rock_perc/100)))) |>
+        mutate(thick100 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                                    bottom > 100 & top < 100 ~ bottom - (bottom -100)-lag(bottom),
+                                    bottom > 100 & top == 0 ~ bottom - (bottom -100)-0,
+                                    bottom > 100 & top > 100 ~ 0,
+                                    bottom < 100 & bottom - lag(bottom) < 0 ~ bottom,
+                                    bottom < 100 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                                    bottom == 100 ~ bottom - lag(bottom),
+                                    .default = 0),
+               SOC_hor_stock100 = ((carbon_perc/100)*BD_g_cm3*thick100*(1-(rock_perc/100)))) |>
+        # clay_hor_100 = (((clay/100)*thick100)/100*(1-(rock_perc/100))),
+        # silt_hor_100 = (((silt/100)*thick100)/100*(1-(rock_perc/100))),
+        # sand_hor_100 = (((sand/100)*thick100)/100*(1-(rock_perc/100))) ) |>
+        mutate(thick120 = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                                    bottom > 120 & top <= 120 ~ bottom - (bottom -120)-lag(bottom),
+                                    bottom > 120 & top >= 120 ~ 0,
+                                    bottom < 120 & bottom - lag(bottom) < 0 ~ bottom,
+                                    bottom < 120 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                                    bottom == 120 ~ bottom - lag(bottom),
+                                    .default = 0),
+               SOC_hor_stock120 = ((carbon_perc/100)*BD_g_cm3*thick120*(1-(rock_perc/100)))) |>
+        # clay_hor_120 = (((clay/100)*thick120)/120*(1-(rock_perc/100))),
+        # silt_hor_120 = (((silt/100)*thick120)/120*(1-(rock_perc/100))),
+        # sand_hor_120 = (((sand/100)*thick120)/120*(1-(rock_perc/100))) ) |>
+        mutate(thickfull = case_when(is.na(depth_cm - lag(depth_cm)) ~ bottom,
+                                     bottom > 999 & top <= 999 ~ bottom - (bottom -999)-lag(bottom),
+                                     bottom > 999 & top >= 999 ~ 0,
+                                     bottom < 999 & bottom - lag(bottom) < 0 ~ bottom,
+                                     bottom < 999 & bottom - lag(bottom) > 0 ~ bottom - lag(bottom),
+                                     bottom == 999 ~ bottom - lag(bottom),
+                                     .default = 0),
+               SOC_hor_stockfull = ((carbon_perc/100)*BD_g_cm3*thickfull*(1-(rock_perc/100)))) |>
+        # clay_hor_full = (((clay/100))*(1-(rock_perc/100))),
+        # silt_hor_full = (((silt/100))*(1-(rock_perc/100))),
+        # sand_hor_full = (((sand/100))*(1-(rock_perc/100))) ) |>
+        dplyr::summarise(SOC_stock_100 = sum(SOC_hor_stock100)*100,
+                         SOC_stock_30 = sum(SOC_hor_stock30)*100,
+                         SOC_stock_60 = sum(SOC_hor_stock60)*100,
+                         SOC_stock_120 = sum(SOC_hor_stock120)*100,
+                         SOC_stock_full = sum(SOC_hor_stockfull)*100,
+                         # clay_30 = sum(clay_hor_30),
+                         # silt_30 = sum(silt_hor_30),
+                         # sand_30 = sum(sand_hor_30),
+                         # clay_60 = sum(clay_hor_60),
+                         # silt_60 = sum(silt_hor_60),
+                         # sand_60 = sum(sand_hor_60),
+                         # clay_100 = sum(clay_hor_100),
+                         # silt_100 = sum(silt_hor_100),
+                         # sand_100 = sum(sand_hor_100),
+                         # clay_120 = sum(clay_hor_120),
+                         # silt_120 = sum(silt_hor_120),
+                         # sand_120 = sum(sand_hor_120),
+                         # clay_full = sum(clay_hor_full),
+                         # silt_full = sum(silt_hor_full),
+                         # sand_full = sum(sand_hor_full),
+                         #stock_check = mean(SOC120),
+                         #WIP = mean(WIP),
+                         site = first(site),
+                         maxdepth = max(depth_cm),
+                         n = n(),
+                         lat = mean(lat, na.rm = T),
+                         lon = mean(lon, na.rm = T),
+                         # sand = mean(sand, na.rm = T),
+                         # silt = mean(silt, na.rm = T),
+                         # clay = mean(clay, na.rm = T),
+                         # ph = mean(ph, na.rm = T),
+                         # hlf = mean(hlf_perc, na.rm = T)
+                         # .by = sample_ID
+        ) |> 
+        # dplyr::summarise(across(where(is.numeric) & starts_with("SOC"), sum),
+        #                  across(where(is.character), first),
+        #                  across(c("depth_cm"), max),
+        #                  across(c("lat", "lon"), ~ mean(.x, na.rm = T)),
+        #                  across(c("cn", "ph", "sand", "silt", "clay"), ~ mean(.x, na.rm= T))) |>
+        dplyr::arrange(sample_ID, desc(lat), .by_group = TRUE) |> 
+        mutate(SOC_stock_0to30 = SOC_stock_30,
+               SOC_stock_30to60 = SOC_stock_60 - SOC_stock_30,
+               SOC_stock_60to100 = SOC_stock_100 - SOC_stock_60,
+               SOC_stock_100to120 = SOC_stock_120 - SOC_stock_100) |> 
+        as.data.frame()
+    return(stocks)
+}
+```
+
+
+Data and data cleaning
+```{r}
+wa_stocks <- stocks_func(wa_hor)
+hoh_stocks_pts <- wa_stocks |> 
+    filter(site == "HOH") |> 
+    vect( geom = c("lon", "lat")) |> 
+    terra::set.crs("EPSG:4326") |> 
+    terra::project("EPSG:2855")
+mas_stocks_pts <- wa_stocks |> 
+    filter(site == "MAS") |> 
+    vect( geom = c("lon", "lat")) |> 
+    terra::set.crs("EPSG:4326") |> 
+    terra::project("EPSG:2856")
+col_stocks_pts <- wa_stocks |> 
+    filter(site == "COL") |> 
+    vect( geom = c("lon", "lat")) |> 
+    terra::set.crs("EPSG:4326") |> 
+    terra::project("EPSG:2855")
+```
+
+
+Raster stacks 
+```{r}
+hoh_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Hoh_PredictorStack_Class.tif")
+mas_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Mas_PredictorStack_Class.tif")
+col_stack <- rast("SOIL CARBON/All_WA/data/Rasters/PredictorStacks/Col_PredictorStack_Class.tif")
+
+```
+
+
+```{r}
+
+hoh_stack$GEO <- subst(hoh_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary"))
+mas_stack$GEO <- subst(mas_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary")) 
+col_stack$GEO <- subst(col_stack$GEO, from = c(0,1,2,3), c("Eocene", "Pleistocene", "PreTertiary", "Quaternary")) 
+
+hoh_stocks_ext <- terra::extract(hoh_stack, hoh_stocks_pts, method = "simple", bind = TRUE)
+mas_stocks_ext <- terra::extract(mas_stack, mas_stocks_pts, method = "simple", bind = TRUE)
+col_stocks_ext <- terra::extract(col_stack, col_stocks_pts, method = "simple", bind = TRUE)
+
+```
+
+
+
+Dataframes
+```{r}
+wa_stocks_dat <- rbind(data.frame(hoh_stocks_ext),data.frame(mas_stocks_ext), data.frame(col_stocks_ext)) |> 
+    rename(EVT = names) |> 
+    mutate(
+        GEO = as.factor(GEO),
+        EVT = as.factor(EVT),
+        geomorphons = as.factor(geomorphons),
+        site = as.factor(site),
+        site = fct_reorder(site, SOC_stock_100, .fun = "median")) |>
+    dplyr::rename_with(~gsub("_median", "", .x, fixed = TRUE))
+
+readr::write_csv(wa_stocks_dat, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_1m_stocks_preds.csv")
+
+columns_to_exclude <- c("SOC_stock_100") 
+
+wa_stocks_scale <- wa_stocks_dat |> 
+    dplyr::select(sample_ID, SOC_stock_100, 
+                  site, CHM, DTM, geomorphons, GEO, WIP, EVT,
+                  EVI, NDVI, NDYI, VPD, 
+                  dev_1000, dev_300, dev_50,
+                  grad_1000, grad_300, grad_50,
+                  MNDWI, HLI, MAT, MAP) |> 
+    dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+        ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_100, .fun = "median")) 
+
+wa_stocks_wet <- wa_stocks_dat |> filter(WIP >= (0.5)) |> 
+    dplyr::select(sample_ID, SOC_stock_100, 
+                  site, CHM, DTM, geomorphons, GEO, WIP, EVT,
+                  EVI, NDVI, NDYI, VPD, 
+                  dev_1000, dev_300, dev_50,
+                  grad_1000, grad_300, grad_50,
+                  MNDWI, HLI, MAT, MAP) |> 
+    dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+        ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_100, .fun = "median"))
+wa_stocks_upl <- wa_stocks_dat |> filter(WIP < 0.5) |> 
+    dplyr::select(sample_ID, SOC_stock_100, 
+                  site, CHM, DTM, geomorphons, GEO, WIP, EVT,
+                  EVI, NDVI, NDYI, VPD, 
+                  dev_1000, dev_300, dev_50,
+                  grad_1000, grad_300, grad_50,
+                  MNDWI, HLI, MAT, MAP) |> 
+    dplyr::mutate(across(
+        dplyr::where(is.numeric) & !all_of(columns_to_exclude),
+        ~dplyr::case_when(TRUE ~ scale(.))),
+        site = fct_reorder(site, SOC_stock_100, .fun = "median"))
+
+```
+
+
+
+
+```{r}
+wa_stocks_num <- wa_stocks_wet |> 
+    dplyr::select(where(is.numeric)) |> as.matrix()
+
+corplot <- ggcorrplot(cor(wa_stocks_num), method = "square", type = "full", lab = T, lab_size = 1.5)
+
+corplot
+```
+
+```{r}
+
+gmod <- glm((SOC_stock_100) ~ 
+                  CHM + HLI + GEO + MAP*WIP + MAT  + EVI + #VPD +#EVT + 
+                dev_1000 + dev_300 + dev_50 + grad_1000 + grad_300 + grad_50, 
+            family = Gamma(link = "log"),
+              data = wa_stocks_scale, na.action = 'na.fail')
+
+gmodw <- glm((SOC_stock_100) ~ 
+                CHM + HLI + GEO + MAP*WIP +  MAT  + EVI + #VPD + #EVT + 
+                dev_1000 + dev_300 + dev_50 + grad_1000 + grad_300 + grad_50, 
+            family = Gamma(link = "log"),
+            data = wa_stocks_wet, na.action = 'na.fail')
+
+gmodu <- glm((SOC_stock_100) ~ 
+                CHM + HLI + GEO + MAP*WIP + MAT + EVI + #VPD +#EVT + 
+                dev_1000 + dev_300 + dev_50 + grad_1000 + grad_300 + grad_50,
+            family = Gamma(link = "log"),
+            data = wa_stocks_upl, na.action = 'na.fail')
+
+modd <- dredge(gmod, rank = "AIC", extra = "R^2", m.lim = c(3,8), fixed = c("MAP", "WIP"))
+moddw <- dredge(gmodw, rank = "AIC", extra = "R^2", m.lim = c(3,8), fixed = c("MAP", "GEO"))
+moddu <- dredge(gmodu, rank = "AIC", extra = "R^2", m.lim = c(3,8), fixed = c("MAP", "WIP"))
+
+head(modd, 5) 
+modd1 <- get.models(modd, 1)[[1]] # fewest terms and lowest AIC
+modd1w <- get.models(moddw, 1)[[1]] # fewest terms and lowest AIC
+modd1u <- get.models(moddu, 1)[[1]] # fewest terms and lowest AIC
+```
+
+
+```{r}
+print("full")
+summary(modd1)
+print("wet")
+summary(modd1w)
+print("upl")
+summary(modd1u)
+```
+
+
+The R2 statistic used is from Zhang et al 2017. there they show that the Likelihood Ratio R2 (LR) and the Nagelkerke R2 can overestimate contributions from unimportant variables. Also, using the R2adj would penalize for additional predictors, but appears to be useful mostly for comparing models. 
+```{r}
+r2mod1 <- 1-(modd1$deviance/modd1$null.deviance)
+r2mod1w <- 1-(modd1w$deviance/modd1w$null.deviance)
+r2mod1u <- 1-(modd1u$deviance/modd1u$null.deviance)
+
+r2 <- rsq::rsq(modd1, type = "v")
+r2w <- rsq::rsq(modd1w, type = "v")
+r2u <- rsq::rsq(modd1u, type = "v")
+
+rmse_caret <- caret::RMSE(pred = predict(modd1, type = "response"), obs = wa_stocks_dat$SOC_stock_100)
+#(sqrt(sum((predict(modd1, type = "response") - wa_stocks_dat$SOC_stock_100)**2)/nrow(wa_stocks_dat)))
+rmse_caretw <- caret::RMSE(pred = predict(modd1w, type = "response"), obs = wa_stocks_wet$SOC_stock_100)
+rmse_caretu <- caret::RMSE(pred = predict(modd1u, type = "response"), obs = wa_stocks_upl$SOC_stock_100)
+
+stat_table_stocks <- data.frame("LandscapeClass" = c("Full", "Wetland", "Upland"),
+                                "R2_deviance" = c(r2mod1, r2mod1w, r2mod1u), 
+                                "R2_V" = c(r2, r2w, r2u),
+                                "RMSE_caret" = c(rmse_caret, rmse_caretw, rmse_caretu))
+#readr::write_csv(stat_table_stocks, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_1m_stocks_model_fit.csv")
+
+
+stat_table_stocks
+```
+
+```{r}
+anova_stocks <- anova(modd1, test = "F") |> data.frame() |> tibble::rownames_to_column()
+anova_stocks_w <- anova(modd1w)
+anova_stocks_u <- anova(modd1u, test = "F")
+
+ci_stocks <- confint.lm(modd1, level = 0.95)
+ci_stocks_w <- confint(modd1w)
+ci_stocks_u <- confint(modd1u)
+
+p_r2b <- rsq::rsq.partial(modd1, type = "v") |> data.frame() |> mutate(across(where(is.numeric), ~base::round(.x, 2)))
+p_r2bw <- rsq::rsq.partial(modd1w, type = "v") |> data.frame() |> mutate(across(where(is.numeric), ~base::round(.x, 2)))
+p_r2bu <- rsq::rsq.partial(modd1u, type = "v") |> data.frame() |> mutate(across(where(is.numeric), ~base::round(.x, 2)))
+
+ci_anova_tab_stocks_func <- function(model, data) {
+  set.seed(11)
+  anova <- anova(model, test = "F") |> data.frame() |> tibble::rownames_to_column() |>
+    rename(Predictor = rowname,
+           F.value = "F") |> 
+    select(Predictor, F.value, Pr..F.) 
+  ci <- confint.lm(model, level = 0.95)
+  r2partial <- rsq::rsq.partial(model, type = "v") |> data.frame() |> 
+    rename(Predictor = variable,
+           PartRsq = partial.rsq,) |> 
+    select(Predictor, PartRsq)
+  
+  ci_anova_tab <- ci |> data.frame() |> tibble::rownames_to_column() |>
+    rename(Predictor = rowname,
+          "2.5%" = X2.5..,
+          "97.5%" = X97.5..) |> 
+    dplyr::filter(!str_detect(Predictor, "sd"), 
+                  !str_detect(Predictor, "Intercept"), 
+                  !str_detect(Predictor, "sigma")) |> 
+    full_join(y = anova, join_by(Predictor)) |> 
+    full_join(y = r2partial, join_by(Predictor)) |> 
+    mutate(across(where(is.numeric), ~base::round(.x, 2)))
+  return(ci_anova_tab)
+}
+
+ci_anova_stocks <- ci_anova_tab_stocks_func(model = modd1, data = wa_stocks_scale)
+ci_anova_stocks_wet <- ci_anova_tab_stocks_func(model = modd1w, data = wa_stocks_wet)
+ci_anova_stocks_upl <- ci_anova_tab_stocks_func(model = modd1u, data = wa_stocks_upl)
+
+# readr::write_csv(ci_anova_stocks, "SOIL CARBON/All_WA/data/dataframes/anova_confint95_stocks.csv")
+# readr::write_csv(ci_anova_stocks_wet, "SOIL CARBON/All_WA/data/dataframes/anova_wet_confint95_stocks.csv")
+# readr::write_csv(ci_anova_stocks_upl, "SOIL CARBON/All_WA/data/dataframes/anova_upl_confint95_stocks.csv")
+
+```
+
+
+
+```{r}
+wa_stocks_dat_plot <- wa_stocks_scale |> 
+    mutate(wetupl = case_when(WIP >= (0.5 - attr(wa_stocks_scale$WIP, "scaled:center"))/attr(wa_stocks_scale$WIP, "scaled:scale") ~ "WET",
+                                                                 .default = "UPL"))
+ggplot() +
+    geom_point(aes(x = SOC_stock_100, y = fitted(modd1w)), 
+               data = wa_stocks_wet, colour = "aquamarine3") +
+    geom_point(aes(x = SOC_stock_100, y = fitted(modd1u)), 
+               data = wa_stocks_upl, colour = "tan") +
+    geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1w)), 
+                data = wa_stocks_wet, method = "lm", method.args=list(family="Gamma"),
+                colour = "aquamarine3", se = T) +
+    geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1u)), 
+                data = wa_stocks_upl, method = "lm", method.args=list(family="Gamma"),
+                colour = "tan", se = T) +
+    geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1)), 
+                data = wa_stocks_dat, method = "lm", method.args=list(family="Gamma"),
+                se = T) +
+    geom_abline(slope = 1, intercept = 0) +
+    ylim(0, 700) + 
+    xlim(0,700)
+```
+
+```{r}
+
+r.sq(wa_stocks_scale$SOC_stock_100, predict(modd1, newdata = wa_stocks_scale, type = "response"))
+r.sq(wa_stocks_wet$SOC_stock_100, predict(modd1w, newdata = wa_stocks_wet, type = "response"))
+r.sq(wa_stocks_upl$SOC_stock_100, predict(modd1u, newdata = wa_stocks_upl, type = "response"))
+
+
+```
+
+```{r}
+save(modd1, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Stocks_Model.RData")
+save(modd1w, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Wet_Stocks_Model.RData")
+save(modd1u, file = "SOIL CARBON/All_WA/analysis/models/All_WA_Upl_Stocks_Model.RData")
+
+PI <- ciTools::add_pi(wa_stocks_scale, fit = modd1, alpha = 0.05) 
+PIw <- ciTools::add_pi(wa_stocks_wet, fit = modd1w, alpha = 0.05) 
+PIu <- ciTools::add_pi(wa_stocks_upl, fit = modd1u, alpha = 0.05) 
+
+PI_rmse <- sqrt(abs(sum((PI$pred - PI$SOC_stock_100)**2))/nrow(wa_stocks_scale))
+PIw_rmse <- sqrt(abs(sum((PIw$pred - PIw$SOC_stock_100)**2))/nrow(wa_stocks_wet))
+PIu_rmse <- sqrt(abs(sum((PIu$pred - PIu$SOC_stock_100)**2))/nrow(wa_stocks_upl))
+
+
+PI_rmse
+PIw_rmse
+PIu_rmse
+```
+
+```{r}
+all_1m_plot <- ggplot() +
+    geom_point(aes(x = SOC_stock_100, y = fitted(modd1w)), 
+               data = wa_stocks_wet, colour = "aquamarine3", size = 2) +
+    geom_point(aes(x = SOC_stock_100, y = fitted(modd1u)), 
+               data = wa_stocks_upl, colour = "tan", size = 2) +
+    
+        geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1w)), 
+                    data = wa_stocks_wet, method = "glm", method.args=list(family="Gamma"), 
+                    colour = "aquamarine3", fill = "aquamarine3", alpha = 0.2,
+                    se = T) +
+        geom_smooth(aes(x = SOC_stock_100, y = PIw$UPB0.975), 
+                data = wa_stocks_wet, method = "glm", method.args=list(family="Gamma"), 
+                colour = "aquamarine3", se = F, lty = "35", lwd = 1) +
+        geom_smooth(aes(x = SOC_stock_100, y =PIw$LPB0.025), 
+                data = wa_stocks_wet, method = "glm", method.args=list(family="Gamma"), 
+                colour = "aquamarine3", se = F, lty = "35", lwd = 1) +
+    
+        geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1u)), 
+                data = wa_stocks_upl, method = "glm", method.args=list(family="Gamma"), 
+                colour = "tan2", fill = "tan2", alpha = 0.2,
+                se = T) +
+        geom_smooth(aes(x = SOC_stock_100, y = PIu$UPB0.975), 
+                data = wa_stocks_upl, method = "glm", method.args=list(family="Gamma"), 
+                colour = "tan2", se = F, lty = "35", lwd = 1) +
+        geom_smooth(aes(x = SOC_stock_100, y =PIu$LPB0.025), 
+                data = wa_stocks_upl, method = "glm", method.args=list(family="Gamma"), 
+                colour = "tan2", se = F, lty = "35", lwd = 1) +
+    
+        geom_smooth(aes(x = SOC_stock_100, y = fitted(modd1)), 
+                data = wa_stocks_dat, method = "glm", method.args=list(family="Gamma"), 
+                colour = "coral3", fill = "coral3", alpha = 0.2,
+                se = T) +
+        geom_smooth(aes(x = SOC_stock_100, y = PI$UPB0.975), 
+                data = wa_stocks_dat, method = "glm", method.args=list(family="Gamma"), 
+                colour = "coral3", se = F, lty = "35", lwd = 1) +
+        geom_smooth(aes(x = SOC_stock_100, y =PI$LPB0.025), 
+                data = wa_stocks_dat, method = "glm", method.args=list(family="Gamma"), 
+                colour = "coral3", se = F, lty = "35", lwd = 1) +
+    
+    geom_abline(slope = 1, intercept = 0, lty = "dotted") +
+    scale_x_continuous(limits = c(0, 750), expand = c(0, 0)) +
+    scale_y_continuous(limits = c(0, 750), expand = c(0, 0)) +
+    ylab(expression('Fitted Model SOC Stock (Mg ha'^-1*')')) +
+    xlab(expression('Actual SOC Stock (Mg ha'^-1*')')) +
+    theme(
+        panel.background = element_blank(),
+        panel.grid.major = element_line(colour = "grey80"),
+        axis.ticks = element_blank()
+    )
+
+save(all_1m_plot, file = "SOIL CARBON/All_WA/writing/Figures/Aggregate_1m_SOC_All_Models.RData")
+```
+
