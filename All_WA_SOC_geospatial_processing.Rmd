@@ -91,20 +91,59 @@ hoh_studyarea <- vect("SOIL CARBON/All_WA/data/Vectors/HOH_POLYGON_711.shp")
 Geology from the Washington Dept. of Natural Resources 
 
 ```{r eval=FALSE}
-wa_geology <- vect("WA_Geo/WA_Geology_100K.gpkg") |> tidyterra::select(GEOLOGIC_AGE)
+wa_geology <- vect("WA_Geo/WA_Geology_100K.gpkg") |> tidyterra::select(GEOLOGIC_AGE, LITHOLOGY)
 
 crop(wa_geology, project(hoh_studyarea, wa_geology)) |> 
   project("EPSG:2855") |> 
-  writeVector("SOIL CARBON/All_WA/data/Vectors/Hoh_geology.shp")
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Hoh_geology.shp", overwrite = TRUE)
 
 crop(wa_geology, project(mas_studyarea, wa_geology)) |> 
   project("EPSG:2856") |> 
-  writeVector("SOIL CARBON/All_WA/data/Vectors/Mashel_geology.shp")
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Mashel_geology.shp", overwrite = TRUE)
 
 crop(wa_geology, project(col_studyarea, wa_geology)) |>
   project("EPSG:2855") |> 
-  writeVector("SOIL CARBON/All_WA/data/Vectors/Colville_geology.shp")
+  writeVector("SOIL CARBON/All_WA/data/Vectors/Colville_geology.shp", overwrite = TRUE)
 
+```
+
+```{r, eval=FALSE}
+hoh_consolidate_litho <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_geology.shp") |> 
+  tidyterra::mutate(LITH = case_when(str_detect(LITHOLOGY, "till|drift|glacial deposits|glaciolacustrine") ~ "glacial till and drift",
+                                     str_detect(LITHOLOGY, "outwash") ~ "glacial outwash",
+                                     str_detect(LITHOLOGY, "tectonic|alluvium|water|mass-wasting|dune") ~ "unconsolidated",
+                                     str_detect(LITHOLOGY, "sedimentary|sandstone") ~ "sedimentary",
+                                     str_detect(LITHOLOGY, "tuff|volcanic|andesite|basalt") ~ "igneous",
+                                     str_detect(LITHOLOGY, "amphibolite|marble|gneiss|quartz|mafic|migmatite|schist|dacite|metacarbonate") ~ "metamorphic",
+                                    .default = LITHOLOGY)) |>
+  select(LITH)
+
+mas_consolidate_litho <- vect("SOIL CARBON/All_WA/data/Vectors/Mashel_geology.shp") |> 
+  tidyterra::mutate(LITH = case_when(str_detect(LITHOLOGY, "till|drift|glacial deposits|glaciolacustrine") ~ "glacial till and drift",
+                                     str_detect(LITHOLOGY, "outwash") ~ "glacial outwash",
+                                     str_detect(LITHOLOGY, "tectonic|alluvium|water|mass-wasting|dune") ~ "unconsolidated",
+                                     str_detect(LITHOLOGY, "sedimentary|sandstone") ~ "sedimentary",
+                                     str_detect(LITHOLOGY, "tuff|volcanic|andesite|basalt") ~ "igneous",
+                                     str_detect(LITHOLOGY, "amphibolite|marble|gneiss|quartz|mafic|migmatite|schist|dacite|metacarbonate") ~ "metamorphic",
+                                    .default = LITHOLOGY)) |>
+  select(LITH)
+col_consolidate_litho <- vect("SOIL CARBON/All_WA/data/Vectors/Colville_geology.shp") |> 
+  tidyterra::mutate(LITH = case_when(str_detect(LITHOLOGY, "till|drift|glacial deposits|glaciolacustrine") ~ "glacial till and drift",
+                                     str_detect(LITHOLOGY, "outwash") ~ "glacial outwash",
+                                     str_detect(LITHOLOGY, "tectonic|alluvium|water|mass-wasting|dune") ~ "unconsolidated",
+                                     str_detect(LITHOLOGY, "sedimentary|sandstone") ~ "sedimentary",
+                                     str_detect(LITHOLOGY, "tuff|volcanic|andesite|basalt") ~ "igneous",
+                                     str_detect(LITHOLOGY, "amphibolite|marble|gneiss|quartz|mafic|migmatite|schist|dacite|metacarbonate|monzo") ~ "metamorphic",
+                                    .default = LITHOLOGY)) |>
+  select(LITH)
+
+plot(hoh_consolidate_litho, "LITH")
+plot(mas_consolidate_litho, "LITH")
+plot(col_consolidate_litho, "LITH")
+
+writeVector(hoh_consolidate_litho, "SOIL CARBON/All_WA/data/Vectors/Hoh_lithology_consolidate.shp",overwrite = TRUE)
+writeVector(mas_consolidate_litho, "SOIL CARBON/All_WA/data/Vectors/Mas_lithology_consolidate.shp",overwrite = TRUE)
+writeVector(col_consolidate_litho, "SOIL CARBON/All_WA/data/Vectors/Col_lithology_consolidate.shp",overwrite = TRUE)
 ```
 
 
@@ -124,7 +163,7 @@ Consolidate the levels in Geologic age to be more broad because our samples did 
   - Eocene
   - Oligocene-Eocene
 - PreTertiary
-  - Traissic-Permian
+  - Triassic-Permian
   - pre-Tertiary
   - Permian
 
@@ -169,12 +208,19 @@ mas_allgeolevels <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_geology_consolidat
 col_allgeolevels <- vect("SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate.shp")|>
    tidyterra::select(GEO)
 
+hoh_litholevels <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_lithology_consolidate.shp") |>
+   tidyterra::select(LITH)
+mas_litholevels <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_lithology_consolidate.shp")|>
+   tidyterra::select(LITH) 
+col_litholevels <- vect("SOIL CARBON/All_WA/data/Vectors/Col_lithology_consolidate.shp")|>
+   tidyterra::select(LITH)
+
 ```
 
 
 Create Rasters from Geology
 
-```{r eval=TRUE}
+```{r eval=FALSE}
 
 hoh_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_geology_consolidate.shp") |>
   terra::rasterize(y = hoh_dem, field = "GEO", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Hoh_geology.tif", overwrite = TRUE)
@@ -185,6 +231,16 @@ mas_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_geology_consolidate
 col_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate.shp") |>
   terra::rasterize(y = col_dem, field = "GEO", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Colville_geology.tif", overwrite = TRUE)
 
+hoh_lith_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Hoh_lithology_consolidate.shp") |>
+  terra::rasterize(y = hoh_dem, field = "LITH", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Hoh_lithology.tif", overwrite = TRUE)
+
+mas_lith_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Mas_lithology_consolidate.shp")|>
+  terra::rasterize(y = mas_dem, field = "LITH", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Mashel_lithology.tif", overwrite = TRUE)
+
+col_lith_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Col_lithology_consolidate.shp") |>
+  terra::rasterize(y = col_dem, field = "LITH", touches = TRUE, filename = "SOIL CARBON/All_WA/data/Rasters/Colville_lithology.tif", overwrite = TRUE)
+
+
 ```
 
 
@@ -193,6 +249,10 @@ col_geoage_rast <- vect("SOIL CARBON/All_WA/data/Vectors/Col_geology_consolidate
 hoh_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_geology.tif")
 mas_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_geology.tif")
 col_geoage_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_geology.tif")
+
+hoh_lith_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Hoh_lithology.tif")
+mas_lith_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Mashel_lithology.tif")
+col_lith_rast <- rast("SOIL CARBON/All_WA/data/Rasters/Colville_lithology.tif")
 
 ```
 
@@ -348,7 +408,7 @@ LF_reclass_func <- function(rastcat, class_df, name){
                                         ignore_case = T)) ~ "Mixed",
       str_detect(names, pattern = regex("Sparse|barren|Volcanic|snow", 
                                         ignore_case = T)) ~ "SparseBarren",
-      str_detect(names, pattern = regex("developed|mines", 
+      str_detect(names, pattern = regex("developed|mines|urban", 
                                         ignore_case = T)) ~ "Urban",
       .default = names))
   
@@ -593,6 +653,8 @@ names(hoh_stack) == names(mas_stack) & names(hoh_stack)  == names(col_stack)
 hoh_stack$GEO <- subst(hoh_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary")) 
 mas_stack$GEO <- subst(mas_stack$GEO, from = c(0,1,2,3), c("Eocene", "Miocene", "Pleistocene", "Quaternary")) 
 col_stack$GEO <- subst(col_stack$GEO, from = c(0,1,2,3), c("Eocene", "Pleistocene", "PreTertiary", "Quaternary")) 
+
+hoh_stack$LITH
 ```
 
 
@@ -631,7 +693,11 @@ col_pts <- vect("SOIL CARBON/All_WA/data/points/col_pts_2855.gpkg")
 ```
 
 ```{r}
+data.frame(hoh_pts)
 data.frame(mas_pts)
+data.frame(col_pts)
+
+data.frame(hoh_pts)|> rbind(data.frame(mas_pts)) |> rbind(data.frame(col_pts)) |> group_by(LITH) |> summarise(n = n())
 ```
 
 ### Extraction Org Min

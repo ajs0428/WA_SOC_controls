@@ -43,6 +43,7 @@ library(pdp)
 library(vip)
 library(formatR)
 library(ggpubr)
+library(ggsoiltexture)
 library(grid)
 library(gridExtra)
 library(aqp)
@@ -64,7 +65,14 @@ r.sq <- function(y,y.fitted){
 
 Data
 
-There isn't enough contious horizon data for doing the mass preserving splines
+There isn't enough continuous horizon data for doing the mass preserving splines
+
+```{r}
+ph_dat <- openxlsx::read.xlsx("/Users/Anthony/OneDrive - UW/University of Washington/Lab Work/WA_Texture_pH/All_PNW_horizons_pH_PSA Analysis.xlsx", sheet = "pH Datasheet", startRow = 2, cols = c(2:5)) |> 
+  na.omit()
+ph_dat
+```
+
 
 ```{r}
 
@@ -77,20 +85,22 @@ psa_dat <- openxlsx::read.xlsx("/Users/Anthony/OneDrive - UW/University of Washi
            "sample_ID" = "Site",
            "StudyArea" = "Study.Area",
            "depth_cm" = "depth") |>
+  mutate("Site|depth" = paste0(sample_ID, "|", depth_cm)) |> 
+  left_join(y = ph_dat, by = join_by("Site|depth")) |> 
     dplyr::group_by(sample_ID) |> 
     arrange(depth_cm, .by_group = TRUE ) |> 
     mutate(top = case_when(is.na(depth_cm - lag(depth_cm)) ~ 0,
                            .default = lag(depth_cm)),
            bottom = depth_cm,
            center = abs(top - (top - bottom)/2)) |> 
-    dplyr::select(sample_ID, StudyArea, top, bottom, center, SOCperc, Sand, Silt, Clay, SiltClay) |> 
+    dplyr::select(sample_ID, StudyArea, top, bottom, center, SOCperc, Sand, Silt, Clay, SiltClay, pH) |> 
   mutate(helper = paste0(sample_ID, "|", bottom)) |> 
   dplyr::right_join(y = wa_hor, join_by(helper)) |> 
   dplyr::select(-sample_ID.y) |> 
   dplyr::rename(sample_ID = sample_ID.x)
 psa_dat
 
-readr::write_csv(psa_dat, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_horizons_PSA.csv")
+readr::write_csv(psa_dat, file = "SOIL CARBON/All_WA/data/dataframes/All_WA_horizons_PSA_pH.csv")
 
 
 # psa_dat_sub <- psa_dat |> dplyr::select(sample_ID, top, bottom, center, SiltClay)
@@ -132,7 +142,7 @@ columns_to_exclude <- c("carbon_stock_g_cm2", "carbon_perc")
 
 wa_psa_dat <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |> 
   rename(lower_depth = depth_cm) |>
-  filter(!is.na(SiltClay)) |>
+  filter(!is.na(pH)) |>
   mutate(
   GEO = as.factor(GEO),
   geomorphons = as.factor(geomorphons),
@@ -146,7 +156,7 @@ wa_psa_dat
 
 wa_psa_dat_wet <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |> 
   filter(WIP >= 0.50) |> 
-  filter(!is.na(SiltClay)) |>
+  filter(!is.na(pH)) |>
   rename(lower_depth = depth_cm) |>
   mutate(
   GEO = as.factor(GEO),
@@ -160,7 +170,7 @@ wa_psa_dat_wet <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |>
 
 wa_psa_dat_upl <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |> 
   filter(WIP < 0.50) |> 
-  filter(!is.na(SiltClay)) |>
+  filter(!is.na(pH)) |>
   rename(lower_depth = depth_cm) |>
   mutate(
   GEO = as.factor(GEO),
@@ -175,30 +185,74 @@ wa_psa_dat_upl <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |>
 
 
 ```{r}
-ggplot(wa_psa_dat, aes(x = GEO, y = SiltClay)) +
-  geom_point(aes(color = MAP)) +
-  scale_color_viridis_b()
+ggplot(wa_psa_dat, aes(x = MAP, y = SiltClay)) +
+  geom_point(aes(color = LITH)) +
+  scale_color_viridis_d()
+ggplot(wa_psa_dat, aes(x = WIP, y = SiltClay)) +
+  geom_point(aes(color = LITH)) +
+  scale_color_viridis_d()
+wa_psa_dat |> group_by(LITH) |> 
+ggplot(aes(x = lower_depth, y = carbon_perc)) +
+  geom_point(aes(color = LITH)) +
+  geom_smooth(aes(colour = LITH, by = LITH), method = "lm", se = F) + 
+  scale_color_viridis_d()
+
+wa_psa_dat |> group_by(LITH) |> 
+ggplot(aes(x = lower_depth, y = pH)) +
+  geom_smooth(aes(colour = LITH, by = LITH, fill = LITH), 
+              method = "lm", se = T, alpha = 0.5) + 
+  scale_fill_discrete(name = "Lithology") +
+  geom_point(aes(color = LITH)) +
+  #geom_smooth(method = "lm", se = F, lty = 3, linewidth = 3) + 
+  scale_color_viridis_d() + 
+  scale_fill_viridis_d() + 
+  xlab("Depth") + 
+  labs(colour = "Lithology",
+       fill = "Lithology") +
+  #guides(colour=guide_legend(title="Lithology")) +
+  theme(panel.background = element_blank(),
+        panel.grid.major = element_line("gray80"),
+        axis.ticks = element_blank())
 ```
+
+```{r}
+
+wa_tex_plotdat <- rbind(hoh_psa_dat, mas_psa_dat, col_psa_dat) |> 
+  select(StudyArea, carbon_stock_g_cm2, carbon_perc, MAP, WIP, LITH, 
+         Sand, Silt, Clay) |>
+  na.omit() |> 
+  mutate(sum = sum(Sand, Silt, Clay)) |> 
+  dplyr::rename_with(tolower) 
+
+
+ggsoiltexture(wa_tex_plotdat) +
+    geom_point(aes(fill = map), shape = 21, size = 3, stroke = 0.1) + 
+  scale_fill_distiller(palette = "GnBu", direction = 1, name = "Mean Annual Precipitation") +
+    theme(legend.title = element_text(face = "bold"),
+          legend.position = "bottom",
+          panel.background = element_blank())
+```
+
 
 
 ```{r}
 #mod7 <- get(load("SOIL CARBON/All_WA/analysis/models/All_WA_Model7_Spline.RData"))
 
-gmod7_c <- lmer(log10(carbon_stock_g_cm2) ~ Clay*(MAP+WIP) + 
-                  lower_depth + CHM + GEO + HLI + 
-                  lower_depth:MAP + 
+gmod7_c <- lmer(log10(carbon_stock_g_cm2) ~ Clay*(lower_depth+MAP+WIP) + pH*(lower_depth+MAP) +  
+                   CHM + LITH + HLI + 
+                  lower_depth:MAP + dev_1000 + grad_1000 + 
                   (1 | sample_ID),
                data = wa_psa_dat,
                REML = FALSE, na.action = 'na.fail')
-gmod7_sc <- lmer(log10(carbon_stock_g_cm2) ~ SiltClay*(MAP+WIP) + 
-                  lower_depth + CHM + GEO + HLI + 
-                  lower_depth:MAP + 
+gmod7_sc <- lmer(log10(carbon_stock_g_cm2) ~ SiltClay*(lower_depth+MAP+WIP) + pH*(lower_depth+MAP) +  
+                   CHM + LITH + HLI + 
+                  lower_depth:MAP + dev_1000 + grad_1000 + 
                   (1 | sample_ID),
                 data = wa_psa_dat,
                 REML = FALSE, na.action = 'na.fail')
 
-dmod7_c <- dredge(gmod7_c, rank = "AIC", extra = "R^2", m.lim = c(1,8), fixed = c("Clay"))
-dmod7_sc <- dredge(gmod7_sc, rank = "AIC", extra = "R^2", m.lim = c(1,8), fixed = c("SiltClay"))
+dmod7_c <- dredge(gmod7_c, rank = "AIC", extra = "R^2", m.lim = c(1,8), subset = c("Clay"))
+dmod7_sc <- dredge(gmod7_sc, rank = "AIC", extra = "R^2", m.lim = c(1,8), subset = c("SiltClay"))
 
 mod7_c <- get.models(dmod7_c, 1)[[1]] 
 mod7_sc <- get.models(dmod7_sc, 1)[[1]] 
@@ -206,23 +260,16 @@ mod7_sc <- get.models(dmod7_sc, 1)[[1]]
 anova(mod7_sc, mod7_c)
 
 summary(mod7_c)
-anova(mod7_c)
+#anova(mod7_c)
 
 summary(mod7_sc)
-anova(mod7_sc)
+#anova(mod7_sc)
+```
 
-gmod7_sc_w <- lmer(log10(carbon_stock_g_cm2) ~ SiltClay*(MAP+WIP) + 
-                  lower_depth + CHM + GEO + HLI + 
-                   lower_depth:MAP + 
-                  (1 | sample_ID),
-                data = wa_psa_dat_wet,
-                REML = FALSE, na.action = 'na.fail')
-gmod7_sc_u <- lmer(log10(carbon_stock_g_cm2) ~ SiltClay*(MAP+WIP) + 
-                  lower_depth + CHM + GEO + HLI + 
-                  lower_depth:MAP + 
-                  (1 | sample_ID),
-                data = wa_psa_dat_upl,
-                REML = FALSE, na.action = 'na.fail')
+
+```{r}
+gmod7_sc_w <- update(mod7_sc, data = wa_psa_dat_wet)
+gmod7_sc_u <-  update(mod7_sc, data = wa_psa_dat_upl)
 
 dmod7_sc_w <- dredge(gmod7_sc_w, rank = "AIC", extra = "R^2", m.lim = c(1,8), fixed = c("SiltClay"))
 dmod7_sc_u <- dredge(gmod7_sc_u, rank = "AIC", extra = "R^2", m.lim = c(1,8), fixed = c("SiltClay"))
@@ -233,8 +280,8 @@ mod7_sc_u <- get.models(dmod7_sc_u, 1)[[1]]
 summary(mod7_sc_w)
 summary(mod7_sc_u)
 
-anova(mod7_sc_w)
-anova(mod7_sc_u)
+# anova(mod7_sc_w)
+# anova(mod7_sc_u)
 
 ```
 
@@ -266,6 +313,17 @@ check_assump_func(mod7_sc_u)
 
 ```
 
+```{r}
+wa_psa_dat_upl |> 
+ggplot() + 
+  geom_point(aes(x = carbon_stock_g_cm2, y = 10**fitted(mod7_sc_u), colour = SiltClay)) + 
+  geom_abline(slope = 1, intercept = 0) +
+  xlim(0, 4) + 
+  ylim(0, 4)
+
+r.sq(wa_psa_dat$carbon_stock_g_cm2,y.fitted = 10**fitted(mod7_sc))
+rms
+```
 
 
 ```{r}
@@ -306,6 +364,12 @@ ci_anova_psa_tab
 ci_anova_psa_tab_w
 ci_anova_psa_tab_u
 ```
+```{r}
+round(r.sq(y = (wa_psa_dat$carbon_stock_g_cm2), y.fitted =  10**fitted(mod7_sc)), 3)
+round(r.sq((wa_psa_dat_wet$carbon_stock_g_cm2), 10**fitted(mod7_sc_w)), 3)
+round(r.sq((wa_psa_dat_upl$carbon_stock_g_cm2), 10**fitted(mod7_sc_u)), 3)
+```
+
 
 ```{r}
 
@@ -340,6 +404,75 @@ RMSE.merMod(mod7_sc)
 
 ```
 
+Kfold Cross Validation
+```{r}
+kFoldCV <- function(K = 6, reps = 10, randSeed = 11, data, model){
+    set.seed(randSeed)
+    kFoldMSE <- 0
+    #kFoldRMSE <- 0
+    #Randomly shuffle the data
+    yourData<- data[sample(nrow(data)),]
+    
+    #Create 10 equally size folds
+    folds <- cut(seq(1,nrow(yourData)),breaks=K,labels=FALSE)
+
+    for(i in 1:reps){
+        kFoldMSE_temp <- 0 # A zero placeholder for MSE
+        kFoldRMSE_temp <- 0
+        for(j in 1:K){
+            testIndexes <- which(folds==j,arr.ind=TRUE)
+            dataTest <- yourData[testIndexes, ]
+            dataTrain <- yourData[-testIndexes, ]
+            # Run model on K-1 folds (training data)
+            mod_kFold <- update(model, 
+                                data   = dataTrain)
+            # Get predicted values on test dataset, as well as true values
+            pred_kFold <- 10**(predict(object  = mod_kFold,
+                                  newdata = dataTest, allow.new.levels = TRUE))
+            actual_kFold    <- (dataTest$carbon_stock_g_cm2)
+            # Calculate MSE for this fold
+            kFoldMSE_temp <- kFoldMSE_temp + sum((pred_kFold - actual_kFold)^2)
+            #kFoldRMSE_temp <- kFoldRMSE_temp + sqrt(sum((pred_kFold - actual_kFold)^2)/nrow(dataTest))
+        }
+        # Add MSE for the given rep
+        kFoldMSE <- kFoldMSE + kFoldMSE_temp
+        #kFoldRMSE <- kFoldRMSE + kFoldRMSE_temp
+    }
+    # Return average MSE across the reps
+    estMSE <- kFoldMSE / reps
+    estRMSE <- sqrt((estMSE/nrow(data)))
+    names(estMSE) <- "Estimated MSE"
+    names(estRMSE) <- "Estimate RMSE"
+    return(list(estMSE, estRMSE))
+}
+```
+
+
+```{r}
+# Test with K = 6
+kf_rmse <- kFoldCV(K = 6,
+        reps      = 10,
+        randSeed  = 11,
+        data = wa_psa_dat,
+        model = mod7_sc
+        )
+kf_rmse_w <- kFoldCV(K = 6,
+        reps      = 10,
+        randSeed  = 11,
+        data = wa_psa_dat_wet,
+        model = mod7_sc_w
+        )
+kf_rmse_u <- kFoldCV(K = 6,
+        reps      = 10,
+        randSeed  = 11,
+        data = wa_psa_dat_upl,
+        model = mod7_sc_w
+        )
+
+kf_df_psa <- data.frame(LandscapeClass = c("Full", "Wetland", "Upland"), 
+                    LMM.psa.k2_rmse = c(kf_rmse[[2]], kf_rmse_w[[2]], kf_rmse_u[[2]]))
+readr::write_csv(kf_df_psa, file = "/Users/Anthony/OneDrive - UW/University of Washington/Data and Modeling/SOIL CARBON/All_WA/data/dataframes/KFold_RMSE_PSA_Depths_Dataframe.csv")
+```
 
 
 ```{r}
